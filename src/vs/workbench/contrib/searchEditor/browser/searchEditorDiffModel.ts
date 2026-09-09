@@ -3,6 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { ValueWithChangeEvent } from '../../../../base/common/event.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
 import { ResourceMap } from '../../../../base/common/map.js';
 import { URI } from '../../../../base/common/uri.js';
@@ -11,16 +12,18 @@ import { ITextModel } from '../../../../editor/common/model.js';
 import { IModelService } from '../../../../editor/common/services/model.js';
 import { ITextModelContentProvider, ITextModelService } from '../../../../editor/common/services/resolverService.js';
 import { IWorkbenchContribution } from '../../../common/contributions.js';
+import { MultiDiffEditorItem } from '../../multiDiffEditor/browser/multiDiffSourceResolverService.js';
 import { parseSearchResultLines, SearchResultSource } from './searchEditorResultLines.js';
 
 export const SearchEditorDiffScheme = 'search-editor-diff';
 
-export type SearchEditorDiffModel = { resource: URI; model: ITextModel };
+export type SearchEditorDiffModel = { resource: URI; originalModel: ITextModel; modifiedModel: ITextModel; item: MultiDiffEditorItem };
 
 export class SearchEditorDiffModelSynchronizer extends Disposable {
 
 	private isUpdating = false;
-	private readonly previewModels = new ResourceMap<ITextModel>();
+	private readonly diffModels = new ResourceMap<SearchEditorDiffModel>();
+	readonly resources = new ValueWithChangeEvent<readonly MultiDiffEditorItem[]>([]);
 
 	constructor(
 		private readonly resultsModel: ITextModel,
@@ -28,18 +31,20 @@ export class SearchEditorDiffModelSynchronizer extends Disposable {
 		previewModels: readonly SearchEditorDiffModel[],
 	) {
 		super();
-		for (const preview of previewModels) {
-			this.previewModels.set(preview.resource, preview.model);
-			this._register(preview.model.onDidChangeContent(() => this.updateResultsModel(preview.model)));
+		for (const diffModel of previewModels) {
+			this.diffModels.set(diffModel.resource, diffModel);
+			this._register(diffModel.originalModel.onDidChangeContent(() => this.updateResources()));
+			this._register(diffModel.modifiedModel.onDidChangeContent(() => this.updateResultsModel(diffModel.modifiedModel)));
 		}
 		this._register(this.resultsModel.onDidChangeContent(() => this.updatePreviewModels()));
+		this.updateResources();
 	}
 
 	private updatePreviewModels(): void {
 		this.runSynchronizedUpdate(() => {
 			const editsByModel = new Map<ITextModel, { range: Range; text: string }[]>();
 			for (const resultLine of parseSearchResultLines(this.resultsModel.getValue(), this.getResultSources())) {
-				const previewModel = this.previewModels.get(resultLine.resource);
+				const previewModel = this.diffModels.get(resultLine.resource)?.modifiedModel;
 				if (!previewModel || resultLine.sourceLineNumber > previewModel.getLineCount() || previewModel.getLineContent(resultLine.sourceLineNumber) === resultLine.text) {
 					continue;
 				}
@@ -53,6 +58,7 @@ export class SearchEditorDiffModelSynchronizer extends Disposable {
 			for (const [previewModel, edits] of editsByModel) {
 				previewModel.pushEditOperations(null, edits, () => null);
 			}
+			this.updateResources();
 		});
 	}
 
@@ -60,7 +66,7 @@ export class SearchEditorDiffModelSynchronizer extends Disposable {
 		this.runSynchronizedUpdate(() => {
 			const edits: { range: Range; text: string }[] = [];
 			for (const resultLine of parseSearchResultLines(this.resultsModel.getValue(), this.getResultSources())) {
-				if (this.previewModels.get(resultLine.resource) !== previewModel || resultLine.sourceLineNumber > previewModel.getLineCount()) {
+				if (this.diffModels.get(resultLine.resource)?.modifiedModel !== previewModel || resultLine.sourceLineNumber > previewModel.getLineCount()) {
 					continue;
 				}
 				const text = previewModel.getLineContent(resultLine.sourceLineNumber);
@@ -74,7 +80,14 @@ export class SearchEditorDiffModelSynchronizer extends Disposable {
 			if (edits.length > 0) {
 				this.resultsModel.pushEditOperations(null, edits, () => null);
 			}
+			this.updateResources();
 		});
+	}
+
+	private updateResources(): void {
+		this.resources.value = [...this.diffModels.values()]
+			.filter(diffModel => diffModel.originalModel.getValue() !== diffModel.modifiedModel.getValue())
+			.map(diffModel => diffModel.item);
 	}
 
 	private runSynchronizedUpdate(update: () => void): void {

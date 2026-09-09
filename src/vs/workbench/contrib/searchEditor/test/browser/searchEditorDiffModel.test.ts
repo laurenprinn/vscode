@@ -15,6 +15,7 @@ import { ICursorStateComputer, IIdentifiedSingleEditOperation, ITextModel } from
 import { IModelService } from '../../../../../editor/common/services/model.js';
 import { ITextModelContentProvider, ITextModelService } from '../../../../../editor/common/services/resolverService.js';
 import { IModelContentChangedEvent } from '../../../../../editor/common/textModelEvents.js';
+import { MultiDiffEditorItem } from '../../../multiDiffEditor/browser/multiDiffSourceResolverService.js';
 import { SearchEditorDiffContentProvider, SearchEditorDiffModelSynchronizer, SearchEditorDiffScheme } from '../../browser/searchEditorDiffModel.js';
 
 suite('SearchEditorDiffModel', () => {
@@ -74,19 +75,44 @@ suite('SearchEditorDiffModel', () => {
 
 	test('synchronizes edits between search results and diff previews', () => {
 		const source = URI.file('/file.txt');
-		const resultsModel = createTestTextModel('/file.txt:\n  1: first\n  2: second');
+		const otherSource = URI.file('/other.txt');
+		const resultsModel = createTestTextModel('/file.txt:\n  1: first\n  2: second\n/other.txt:\n  1: other');
+		const originalModel = createTestTextModel('first\nsecond');
 		const previewModel = createTestTextModel('first\nsecond');
-		disposables.add(new SearchEditorDiffModelSynchronizer(resultsModel, () => [{ label: '/file.txt', resource: source }], [{ resource: source, model: previewModel }]));
+		const otherOriginalModel = createTestTextModel('other');
+		const otherPreviewModel = createTestTextModel('other');
+		const item = new MultiDiffEditorItem(source, URI.parse('search-editor-diff:/file.txt'), source);
+		const otherItem = new MultiDiffEditorItem(otherSource, URI.parse('search-editor-diff:/other.txt'), otherSource);
+		const synchronizer = disposables.add(new SearchEditorDiffModelSynchronizer(
+			resultsModel,
+			() => [{ label: '/file.txt', resource: source }, { label: '/other.txt', resource: otherSource }],
+			[
+				{ resource: source, originalModel, modifiedModel: previewModel, item },
+				{ resource: otherSource, originalModel: otherOriginalModel, modifiedModel: otherPreviewModel, item: otherItem },
+			],
+		));
 
+		assert.strictEqual(synchronizer.resources.value.length, 0);
 		previewModel.pushEditOperations(null, [{ range: new Range(1, 1, 1, 6), text: 'from diff' }], () => null);
 		resultsModel.pushEditOperations(null, [{ range: new Range(3, 6, 3, 12), text: 'from search' }], () => null);
 
 		assert.deepStrictEqual({
 			results: resultsModel.getValue(),
 			preview: previewModel.getValue(),
+			changedResources: synchronizer.resources.value.map(resource => resource.goToFileUri?.path),
 		}, {
-			results: '/file.txt:\n  1: from diff\n  2: from search',
+			results: '/file.txt:\n  1: from diff\n  2: from search\n/other.txt:\n  1: other',
 			preview: 'from diff\nfrom search',
+			changedResources: ['/file.txt'],
 		});
+
+		resultsModel.pushEditOperations(null, [{ range: new Range(5, 6, 5, 11), text: 'changed other' }], () => null);
+		assert.deepStrictEqual(synchronizer.resources.value.map(resource => resource.goToFileUri?.path), ['/file.txt', '/other.txt']);
+
+		originalModel.pushEditOperations(null, [
+			{ range: new Range(1, 1, 1, 6), text: 'from diff' },
+			{ range: new Range(2, 1, 2, 7), text: 'from search' },
+		], () => null);
+		assert.deepStrictEqual(synchronizer.resources.value.map(resource => resource.goToFileUri?.path), ['/other.txt']);
 	});
 });

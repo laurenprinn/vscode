@@ -574,7 +574,7 @@ registerAction2(class extends Action2 {
 			return undefined;
 		}
 		const input = getActiveSearchEditorDiffInput(accessor.get(IEditorService));
-		const item = input?.initialResources?.find(item => item.modifiedUri && isEqual(item.modifiedUri, resource));
+		const item = input?.resources.get()?.find(item => item.modifiedUri && isEqual(item.modifiedUri, resource));
 		if (!item) {
 			return undefined;
 		}
@@ -601,10 +601,11 @@ registerAction2(class extends Action2 {
 
 	run(accessor: ServicesAccessor): Promise<void> | undefined {
 		const input = getActiveSearchEditorDiffInput(accessor.get(IEditorService));
-		if (!input?.initialResources) {
+		const items = input?.resources.get();
+		if (!items) {
 			return undefined;
 		}
-		return applySearchEditorDiffItems(accessor, input.initialResources, localize('searchEditor.applyAllResultChanges.label', "Apply All Search Result Changes"));
+		return applySearchEditorDiffItems(accessor, items, localize('searchEditor.applyAllResultChanges.label', "Apply All Search Result Changes"));
 	}
 });
 

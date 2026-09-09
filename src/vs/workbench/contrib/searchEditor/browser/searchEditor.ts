@@ -14,7 +14,7 @@ import { KeyCode, KeyMod } from '../../../../base/common/keyCodes.js';
 import { DisposableStore } from '../../../../base/common/lifecycle.js';
 import { ResourceMap } from '../../../../base/common/map.js';
 import { Schemas } from '../../../../base/common/network.js';
-import { joinPath } from '../../../../base/common/resources.js';
+import { isEqual, joinPath } from '../../../../base/common/resources.js';
 import { assertReturnsDefined } from '../../../../base/common/types.js';
 import { URI } from '../../../../base/common/uri.js';
 import './media/searchEditor.css';
@@ -74,7 +74,7 @@ import { getDefaultHoverDelegate } from '../../../../base/browser/ui/hover/hover
 import { IHoverService } from '../../../../platform/hover/browser/hover.js';
 import { ISearchResult } from '../../search/browser/searchTreeModel/searchTreeCommon.js';
 import { MultiDiffEditorInput } from '../../multiDiffEditor/browser/multiDiffEditorInput.js';
-import { MultiDiffEditorItem } from '../../multiDiffEditor/browser/multiDiffSourceResolverService.js';
+import { IMultiDiffSourceResolverService, MultiDiffEditorItem } from '../../multiDiffEditor/browser/multiDiffSourceResolverService.js';
 import { SearchEditorDiffModel, SearchEditorDiffModelSynchronizer, SearchEditorDiffScheme } from './searchEditorDiffModel.js';
 
 const RESULT_LINE_REGEX = /^(\s+)(\d+)(: |  )(\s*)(.*)$/;
@@ -135,6 +135,7 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 		@IHoverService private readonly hoverService: IHoverService,
 		@ITextModelService private readonly textModelService: ITextModelService,
 		@ILanguageService private readonly languageService: ILanguageService,
+		@IMultiDiffSourceResolverService private readonly multiDiffSourceResolverService: IMultiDiffSourceResolverService,
 	) {
 		super(SearchEditor.ID, group, telemetryService, instantiationService, storageService, textResourceService, themeService, editorService, editorGroupService, fileService);
 		this.container = DOM.$('.search-editor');
@@ -275,11 +276,11 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 		const sourceReferences = new DisposableStore();
 		const previewModels = new DisposableStore();
 		const synchronizedPreviewModels: SearchEditorDiffModel[] = [];
-		const items: MultiDiffEditorItem[] = [];
 		const resultHashText: string[] = [];
 		const sourceHashText: string[] = [];
 		let diffInput: MultiDiffEditorInput | undefined;
 		let synchronizer: SearchEditorDiffModelSynchronizer | undefined;
+		let resolverRegistration: { dispose(): void } | undefined;
 		try {
 			for (const [resource, lines] of linesByResource) {
 				const reference = sourceReferences.add(await this.textModelService.createModelReference(resource));
@@ -298,31 +299,38 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 				const { lines: modifiedLines } = applySearchResultLines(sourceModel.getLinesContent(), lines);
 				const previewUri = URI.from({ scheme: SearchEditorDiffScheme, authority: generateUuid(), path: resource.path });
 				const previewModel = previewModels.add(this.modelService.createModel(modifiedLines.join(sourceModel.getEOL()), this.languageService.createById(sourceModel.getLanguageId()), previewUri));
-				synchronizedPreviewModels.push({ resource, model: previewModel });
-				items.push(new MultiDiffEditorItem(resource, previewUri, resource, undefined, undefined, false));
+				const item = new MultiDiffEditorItem(resource, previewUri, resource, undefined, undefined, false);
+				synchronizedPreviewModels.push({ resource, originalModel: sourceModel, modifiedModel: previewModel, item });
 			}
 
 			const [resultHash, sourceHash] = await Promise.all([
 				computeSearchResultHash(resultHashText.join('\n')),
 				computeSearchResultHash(sourceHashText.join('\n')),
 			]);
-			if (resultHash === sourceHash || items.length === 0) {
+			if (resultHash === sourceHash || synchronizedPreviewModels.length === 0) {
 				this.notificationService.info(localize('searchEditor.noResultChanges', "Search results match the current source files."));
 				return;
 			}
 
 			synchronizer = new SearchEditorDiffModelSynchronizer(resultsModel, () => input.getResultSources(), synchronizedPreviewModels);
+			const multiDiffSource = URI.from({ scheme: SearchEditorDiffScheme, path: `/search-result-changes-${generateUuid()}` });
+			resolverRegistration = this.multiDiffSourceResolverService.registerResolver({
+				canHandleUri: uri => isEqual(uri, multiDiffSource),
+				resolveDiffSource: () => Promise.resolve({ resources: synchronizer!.resources }),
+			});
 			diffInput = this.instantiationService.createInstance(
 				MultiDiffEditorInput,
-				URI.from({ scheme: SearchEditorDiffScheme, path: `/search-result-changes-${generateUuid()}` }),
+				multiDiffSource,
 				localize('searchEditor.resultChanges', "Search Result Changes"),
-				items,
+				undefined,
 				true
 			);
 			const disposeListener = diffInput.onWillDispose(() => {
 				disposeListener.dispose();
+				resolverRegistration?.dispose();
 				synchronizer?.dispose();
 				previewModels.dispose();
+				sourceReferences.dispose();
 			});
 			const targetGroup = this.editorGroupService.findGroup({ direction: GroupDirection.RIGHT }, this.group)
 				?? this.editorGroupService.addGroup(this.group, GroupDirection.RIGHT);
@@ -330,14 +338,16 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 				diffInput.dispose();
 			}
 		} catch (error) {
+			resolverRegistration?.dispose();
 			synchronizer?.dispose();
 			previewModels.dispose();
+			sourceReferences.dispose();
 			diffInput?.dispose();
 			throw error;
 		} finally {
-			sourceReferences.dispose();
 			if (!diffInput) {
 				previewModels.dispose();
+				sourceReferences.dispose();
 			}
 		}
 	}
