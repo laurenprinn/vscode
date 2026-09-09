@@ -20,6 +20,7 @@ import { ICellMatch, isNotebookFileMatch } from '../../search/browser/notebookSe
 
 // Using \r\n on Windows inserts an extra newline between results.
 const lineDelimiter = '\n';
+const searchResultFileLinePattern = /^(?<label>\S.*):$/;
 
 const translateRangeLines =
 	(n: number) =>
@@ -61,7 +62,10 @@ const matchToSearchResultFormat = (match: ISearchTreeMatch, longestLineNumber: n
 	return results;
 };
 
-type SearchResultSerialization = { text: string[]; matchRanges: Range[] };
+export type SearchResultSource = { label: string; resource: URI };
+export type SearchResultLine = { resource: URI; sourceLineNumber: number; text: string };
+
+type SearchResultSerialization = { text: string[]; matchRanges: Range[]; sources: SearchResultSource[] };
 
 function fileMatchToSearchResultFormat(fileMatch: ISearchTreeFileMatch, labelFormatter: (x: URI) => string): SearchResultSerialization[] {
 
@@ -73,7 +77,8 @@ function fileMatchToSearchResultFormat(fileMatch: ISearchTreeFileMatch, labelFor
 function matchesToSearchResultFormat(resource: URI, sortedMatches: ISearchTreeMatch[], matchContext: Map<number, string>, labelFormatter: (x: URI) => string, shouldUseHeader = true): SearchResultSerialization {
 	const longestLineNumber = sortedMatches[sortedMatches.length - 1].range().endLineNumber.toString().length;
 
-	const text: string[] = shouldUseHeader ? [`${labelFormatter(resource)}:`] : [];
+	const label = labelFormatter(resource);
+	const text: string[] = shouldUseHeader ? [`${label}:`] : [];
 	const matchRanges: Range[] = [];
 
 	const targetLineNumberToOffset: Record<string, number> = {};
@@ -112,7 +117,7 @@ function matchesToSearchResultFormat(resource: URI, sortedMatches: ISearchTreeMa
 		text.push(`  ${lineNumber}  ${line}`);
 	}
 
-	return { text, matchRanges };
+	return { text, matchRanges, sources: shouldUseHeader ? [{ label, resource }] : [] };
 }
 
 function cellMatchToSearchResultFormat(cellMatch: ICellMatch, labelFormatter: (x: URI) => string, shouldUseHeader: boolean): SearchResultSerialization {
@@ -161,8 +166,6 @@ export const serializeSearchConfiguration = (config: Partial<SearchConfiguration
 		''
 	]).join(lineDelimiter);
 };
-
-export const serializeSearchResultHash = (resultHash: string): string => `# ResultHash: ${resultHash}`;
 
 export const computeSearchResultHash = async (text: string): Promise<string> => {
 	const resultHashBuffer = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
@@ -244,7 +247,7 @@ export const extractSearchQueryFromLines = (lines: string[]): SearchConfiguratio
 };
 
 export const serializeSearchResultForEditor =
-	async (searchResult: ISearchResult, rawIncludePattern: string, rawExcludePattern: string, contextLines: number, labelFormatter: (x: URI) => string, sortOrder: SearchSortOrder, limitHit?: boolean): Promise<{ matchRanges: Range[]; text: string; config: Partial<SearchConfiguration>; resultHash: string }> => {
+	async (searchResult: ISearchResult, rawIncludePattern: string, rawExcludePattern: string, contextLines: number, labelFormatter: (x: URI) => string, sortOrder: SearchSortOrder, limitHit?: boolean): Promise<{ matchRanges: Range[]; text: string; config: Partial<SearchConfiguration>; sources: SearchResultSource[] }> => {
 		if (!searchResult.query) { throw Error('Internal Error: Expected query, got null'); }
 		const config = contentPatternToSearchConfiguration(searchResult.query, rawIncludePattern, rawExcludePattern, contextLines);
 
@@ -273,22 +276,80 @@ export const serializeSearchResultForEditor =
 			matchRanges: allResults.matchRanges.map(translateRangeLines(info.length)),
 			text,
 			config,
-			resultHash: await computeSearchResultHash(text)
+			sources: allResults.sources
 		};
 	};
 
 const flattenSearchResultSerializations = (serializations: SearchResultSerialization[]): SearchResultSerialization => {
 	const text: string[] = [];
 	const matchRanges: Range[] = [];
+	const sources: SearchResultSource[] = [];
 
 	serializations.forEach(serialized => {
 		serialized.matchRanges.map(translateRangeLines(text.length)).forEach(range => matchRanges.push(range));
 		serialized.text.forEach(line => text.push(line));
+		sources.push(...serialized.sources);
 		text.push(''); // new line
 	});
 
-	return { text, matchRanges };
+	return { text, matchRanges, sources };
 };
+
+export function parseSearchResultLines(text: string, sources: readonly SearchResultSource[]): SearchResultLine[] {
+	const sourceByLabel = new Map(sources.map(source => [source.label, source.resource]));
+	const resultLinePattern = /^(?<indentation>\s+)(?<lineNumber>\d+)(?<separator>: |  )/;
+	const result: SearchResultLine[] = [];
+	let resource: URI | undefined;
+
+	for (const line of text.split(/\r?\n/)) {
+		const fileMatch = searchResultFileLinePattern.exec(line);
+		if (fileMatch?.groups) {
+			resource = sourceByLabel.get(fileMatch.groups.label);
+			continue;
+		}
+
+		const lineMatch = resultLinePattern.exec(line);
+		if (resource && lineMatch?.groups) {
+			const sourceLineNumber = Number(lineMatch.groups.lineNumber);
+			if (sourceLineNumber < 1) {
+				continue;
+			}
+			result.push({
+				resource,
+				sourceLineNumber,
+				text: line.slice(lineMatch[0].length)
+			});
+		}
+	}
+
+	return result;
+}
+
+export function extractSearchResultSourceLabels(text: string): string[] {
+	const labels = new Set<string>();
+	for (const line of text.split(/\r?\n/)) {
+		const fileMatch = searchResultFileLinePattern.exec(line);
+		if (fileMatch?.groups) {
+			labels.add(fileMatch.groups.label);
+		}
+	}
+	return [...labels];
+}
+
+export function applySearchResultLines(sourceLines: readonly string[], resultLines: readonly SearchResultLine[]): { lines: string[]; changed: boolean } {
+	const lines = [...sourceLines];
+	let changed = false;
+	for (const resultLine of resultLines) {
+		if (resultLine.sourceLineNumber < 1 || resultLine.sourceLineNumber > lines.length) {
+			continue;
+		}
+		if (lines[resultLine.sourceLineNumber - 1] !== resultLine.text) {
+			lines[resultLine.sourceLineNumber - 1] = resultLine.text;
+			changed = true;
+		}
+	}
+	return { lines, changed };
+}
 
 export const parseSavedSearchEditor = async (accessor: ServicesAccessor, resource: URI) => {
 	const textFileService = accessor.get(ITextFileService);
@@ -313,8 +374,5 @@ export const parseSerializedSearchEditor = (text: string) => {
 		}
 	}
 
-	const resultHashPattern = /^# ResultHash: (?<hash>[a-f0-9]{64})$/;
-	const resultHash = headerlines.map(line => resultHashPattern.exec(line)?.groups?.hash).find(hash => hash !== undefined);
-
-	return { config: extractSearchQueryFromLines(headerlines), text: bodylines.join('\n'), resultHash };
+	return { config: extractSearchQueryFromLines(headerlines), text: bodylines.join('\n') };
 };

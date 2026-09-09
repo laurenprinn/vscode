@@ -17,7 +17,7 @@ import { Emitter } from '../../../../base/common/event.js';
 import { ResourceMap } from '../../../../base/common/map.js';
 import { SEARCH_RESULT_LANGUAGE_ID } from '../../../services/search/common/search.js';
 
-export type SearchEditorData = { resultsModel: ITextModel; configurationModel: SearchConfigurationModel; resultHash?: string };
+export type SearchEditorData = { resultsModel: ITextModel; configurationModel: SearchConfigurationModel };
 
 export class SearchConfigurationModel {
 	private _onConfigDidUpdate = new Emitter<SearchConfiguration>();
@@ -130,11 +130,10 @@ class SearchEditorModelFactory {
 							return backup;
 						}
 
-						const { text, config, resultHash } = await instantiationService.invokeFunction(parseSavedSearchEditor, existingFile);
+						const { text, config } = await instantiationService.invokeFunction(parseSavedSearchEditor, existingFile);
 						return ({
 							resultsModel: modelService.createModel(text ?? '', languageService.createById(SEARCH_RESULT_LANGUAGE_ID), resource),
-							configurationModel: new SearchConfigurationModel(config),
-							resultHash
+							configurationModel: new SearchConfigurationModel(config)
 						});
 					})();
 				}
@@ -155,12 +154,11 @@ class SearchEditorModelFactory {
 
 		if (model) {
 			const existingFile = model.getValue();
-			const { text, config, resultHash } = parseSerializedSearchEditor(existingFile);
+			const { text, config } = parseSerializedSearchEditor(existingFile);
 			modelService.destroyModel(resource);
 			return ({
 				resultsModel: modelService.createModel(text ?? '', languageService.createById(SEARCH_RESULT_LANGUAGE_ID), resource),
-				configurationModel: new SearchConfigurationModel(config),
-				resultHash
+				configurationModel: new SearchConfigurationModel(config)
 			});
 		}
 		else {

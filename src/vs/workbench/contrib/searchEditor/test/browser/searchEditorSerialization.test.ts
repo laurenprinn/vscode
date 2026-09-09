@@ -10,7 +10,7 @@ import { mock } from '../../../../../base/test/common/mock.js';
 import { Range } from '../../../../../editor/common/core/range.js';
 import { ITextQuery, OneLineRange, QueryType, SearchSortOrder } from '../../../../services/search/common/search.js';
 import { ISearchResult, ISearchTreeFileMatch, ISearchTreeFolderMatch, ISearchTreeMatch } from '../../../search/browser/searchTreeModel/searchTreeCommon.js';
-import { computeSearchResultHash, parseSerializedSearchEditor, serializeSearchConfiguration, serializeSearchResultForEditor, serializeSearchResultHash } from '../../browser/searchEditorSerialization.js';
+import { applySearchResultLines, computeSearchResultHash, extractSearchResultSourceLabels, parseSearchResultLines, parseSerializedSearchEditor, serializeSearchConfiguration, serializeSearchResultForEditor } from '../../browser/searchEditorSerialization.js';
 
 suite('SearchEditorSerialization', () => {
 	ensureNoDisposablesAreLeakedInTestSuite();
@@ -47,34 +47,39 @@ suite('SearchEditorSerialization', () => {
 		};
 	}
 
-	test('result hash reflects the complete rendered results', async () => {
+	test('edited results map to source lines', async () => {
 		const serialize = async (result: ISearchResult) => serializeSearchResultForEditor(result, '', '', 1, uri => uri.path, SearchSortOrder.Default);
-		const serialized = [
-			await serialize(createSearchResult('needle', 'before')),
-			await serialize(createSearchResult('changed', 'before')),
-			await serialize(createSearchResult('needle', 'different context')),
-			await serialize(createSearchResult('needle', 'before', 'another result')),
-		];
-		const hashes = serialized.map(value => value.resultHash);
-		const sameResultsDifferentQueryHash = (await serialize(createSearchResult('needle', 'before', undefined, 'other'))).resultHash;
-		const manuallyEditedResultHash = await computeSearchResultHash(`${serialized[0].text} edited`);
-		const textEditorContents = `${serializeSearchConfiguration({ query: 'needle' })}${serializeSearchResultHash(hashes[0])}\n\n${serialized[0].text}`;
+		const serialized = await serialize(createSearchResult('needle', 'before'));
+		const textEditorContents = `${serializeSearchConfiguration({ query: 'needle' })}\n${serialized.text}`;
 		const parsed = parseSerializedSearchEditor(textEditorContents);
+		const editedText = serialized.text.replace('  2: needle', '  2: replacement');
+		const parsedLines = parseSearchResultLines(editedText, serialized.sources);
+		const applied = applySearchResultLines(['before', 'needle', 'after', 'unchanged'], parsedLines);
+		const [resultHash, sourceHash] = await Promise.all([
+			computeSearchResultHash('replacement'),
+			computeSearchResultHash('needle'),
+		]);
 
 		assert.deepStrictEqual({
-			searchEditorResultHeader: serialized[0].text.split('\n').slice(0, 2),
-			textEditorHeader: textEditorContents.split('\n').slice(0, 4).map(line => line.replace(/[a-f0-9]{64}$/, '<hash>')),
-			parsedResultHash: parsed.resultHash?.replace(/[a-f0-9]{64}$/, '<hash>'),
-			uniqueHashCount: new Set(hashes).size,
-			sameResultsHashMatches: sameResultsDifferentQueryHash === hashes[0],
-			manualEditChangesHash: manuallyEditedResultHash !== hashes[0],
+			searchEditorResultHeader: serialized.text.split('\n').slice(0, 2),
+			textEditorHeader: textEditorContents.split('\n').slice(0, 3),
+			parsedQuery: parsed.config.query,
+			sourceLabels: extractSearchResultSourceLabels(parsed.text),
+			hashesDiffer: resultHash !== sourceHash,
+			parsedLines: parsedLines.map(line => ({ resource: line.resource.path, lineNumber: line.sourceLineNumber, text: line.text })),
+			applied,
 		}, {
 			searchEditorResultHeader: ['1 result - 1 file', ''],
-			textEditorHeader: ['# Query: needle', '# ResultHash: <hash>', '', '1 result - 1 file'],
-			parsedResultHash: '<hash>',
-			uniqueHashCount: 4,
-			sameResultsHashMatches: true,
-			manualEditChangesHash: true,
+			textEditorHeader: ['# Query: needle', '', '1 result - 1 file'],
+			parsedQuery: 'needle',
+			sourceLabels: ['/file.txt'],
+			hashesDiffer: true,
+			parsedLines: [
+				{ resource: '/file.txt', lineNumber: 1, text: 'before' },
+				{ resource: '/file.txt', lineNumber: 2, text: 'replacement' },
+				{ resource: '/file.txt', lineNumber: 3, text: 'after' },
+			],
+			applied: { lines: ['before', 'replacement', 'after', 'unchanged'], changed: true },
 		});
 	});
 });

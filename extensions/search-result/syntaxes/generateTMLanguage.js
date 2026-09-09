@@ -197,14 +197,6 @@ const header = [
 		]
 	},
 	{
-		match: '^(# ResultHash): ([a-f0-9]{64})$',
-		name: scopes.header.meta,
-		captures: {
-			'1': { name: scopes.header.key },
-			'2': { name: scopes.header.value }
-		}
-	},
-	{
 		match: '^(# (?:Including|Excluding)): (.*)$',
 		name: scopes.header.meta,
 		captures: {
