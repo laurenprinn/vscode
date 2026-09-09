@@ -20,6 +20,7 @@ import { CommandsRegistry } from '../../../../platform/commands/common/commands.
 import { ContextKeyExpr, IContextKeyService } from '../../../../platform/contextkey/common/contextkey.js';
 import { SyncDescriptor } from '../../../../platform/instantiation/common/descriptors.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
+import { InstantiationType, registerSingleton } from '../../../../platform/instantiation/common/extensions.js';
 import { KeybindingWeight } from '../../../../platform/keybinding/common/keybindingsRegistry.js';
 import { Registry } from '../../../../platform/registry/common/platform.js';
 import { EditorPaneDescriptor, IEditorPaneRegistry } from '../../../browser/editor.js';
@@ -48,7 +49,9 @@ import { MultiDiffEditor } from '../../multiDiffEditor/browser/multiDiffEditor.j
 import { MultiDiffEditorInput } from '../../multiDiffEditor/browser/multiDiffEditorInput.js';
 import { MultiDiffEditorItem } from '../../multiDiffEditor/browser/multiDiffSourceResolverService.js';
 import { SearchEditorDiffContentProvider, SearchEditorDiffScheme } from './searchEditorDiffModel.js';
+import { ISearchEditorResultLogService, SearchEditorResultLogService } from './searchEditorResultLogService.js';
 
+registerSingleton(ISearchEditorResultLogService, SearchEditorResultLogService, InstantiationType.Delayed);
 
 const OpenInEditorCommandId = 'search.action.openInEditor';
 const OpenNewEditorToSideCommandId = 'search.action.openNewEditorToSide';
@@ -88,9 +91,12 @@ async function applySearchEditorDiffItems(accessor: ServicesAccessor, items: rea
 	const textModelService = accessor.get(ITextModelService);
 	const bulkEditService = accessor.get(IBulkEditService);
 	const editorService = accessor.get(IEditorService);
+	const logService = accessor.get(ISearchEditorResultLogService);
 	const references = new DisposableStore();
 	try {
+		logService.info(`Applying Search Editor result changes (requestedFiles=${items.length})`);
 		const edits: ResourceTextEdit[] = [];
+		const editedResources: URI[] = [];
 		for (const item of items) {
 			if (!item.originalUri || !item.modifiedUri || item.modifiedUri.scheme !== SearchEditorDiffScheme) {
 				continue;
@@ -101,6 +107,7 @@ async function applySearchEditorDiffItems(accessor: ServicesAccessor, items: rea
 			const originalModel = originalReference.object.textEditorModel;
 			const modifiedModel = modifiedReference.object.textEditorModel;
 			if (originalModel.getValue() !== modifiedModel.getValue()) {
+				editedResources.push(item.originalUri);
 				edits.push(new ResourceTextEdit(
 					item.originalUri,
 					{ range: originalModel.getFullModelRange(), text: modifiedModel.getValue() },
@@ -115,9 +122,20 @@ async function applySearchEditorDiffItems(accessor: ServicesAccessor, items: rea
 				code: 'undoredo.searchEditor.applyChanges',
 			});
 			if (result.isApplied) {
+				logService.info(`Applied Search Editor result changes (files=${edits.length})`);
+				for (const resource of editedResources) {
+					logService.info(`Applied changes to ${resource.toString()}`);
+				}
 				updateVisibleSearchEditors(editorService);
+			} else {
+				logService.warn(`Search Editor result changes were not applied (files=${edits.length})`);
 			}
+		} else {
+			logService.info('Apply skipped: selected Search Editor results match source files');
 		}
+	} catch (error) {
+		logService.error('Failed to apply Search Editor result changes', error);
+		throw error;
 	} finally {
 		references.dispose();
 	}
@@ -127,12 +145,15 @@ async function applySearchEditorDiffText(accessor: ServicesAccessor, resource: U
 	const textModelService = accessor.get(ITextModelService);
 	const bulkEditService = accessor.get(IBulkEditService);
 	const editorService = accessor.get(IEditorService);
+	const logService = accessor.get(ISearchEditorResultLogService);
 	const reference = await textModelService.createModelReference(resource);
 	try {
 		const model = reference.object.textEditorModel;
 		if (model.getValue() === text) {
+			logService.info(`Apply skipped: Search Editor result matches source file (${resource.toString()})`);
 			return;
 		}
+		logService.info(`Applying Search Editor result change (${resource.toString()})`);
 		const result = await bulkEditService.apply([
 			new ResourceTextEdit(resource, { range: model.getFullModelRange(), text }, model.getVersionId()),
 		], {
@@ -140,8 +161,14 @@ async function applySearchEditorDiffText(accessor: ServicesAccessor, resource: U
 			code: 'undoredo.searchEditor.applyChange',
 		});
 		if (result.isApplied) {
+			logService.info(`Applied Search Editor result change (${resource.toString()})`);
 			updateVisibleSearchEditors(editorService);
+		} else {
+			logService.warn(`Search Editor result change was not applied (${resource.toString()})`);
 		}
+	} catch (error) {
+		logService.error(`Failed to apply Search Editor result change (${resource.toString()})`, error);
+		throw error;
 	} finally {
 		reference.dispose();
 	}

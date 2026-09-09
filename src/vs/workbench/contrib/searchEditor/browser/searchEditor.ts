@@ -76,6 +76,7 @@ import { ISearchResult } from '../../search/browser/searchTreeModel/searchTreeCo
 import { MultiDiffEditorInput } from '../../multiDiffEditor/browser/multiDiffEditorInput.js';
 import { IMultiDiffSourceResolverService, MultiDiffEditorItem } from '../../multiDiffEditor/browser/multiDiffSourceResolverService.js';
 import { SearchEditorDiffModel, SearchEditorDiffModelSynchronizer, SearchEditorDiffScheme } from './searchEditorDiffModel.js';
+import { ISearchEditorResultLogService } from './searchEditorResultLogService.js';
 
 const RESULT_LINE_REGEX = /^(\s+)(\d+)(: |  )(\s*)(.*)$/;
 const FILE_LINE_REGEX = /^(\S.*):$/;
@@ -137,6 +138,7 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 		@ITextModelService private readonly textModelService: ITextModelService,
 		@ILanguageService private readonly languageService: ILanguageService,
 		@IMultiDiffSourceResolverService private readonly multiDiffSourceResolverService: IMultiDiffSourceResolverService,
+		@ISearchEditorResultLogService private readonly searchEditorResultLogService: ISearchEditorResultLogService,
 	) {
 		super(SearchEditor.ID, group, telemetryService, instantiationService, storageService, textResourceService, themeService, editorService, editorGroupService, fileService);
 		this.container = DOM.$('.search-editor');
@@ -258,6 +260,7 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 
 	async openResultsDiff(): Promise<void> {
 		if (!this.openResultsDiffAction.enabled) {
+			this.searchEditorResultLogService.info('Open diff skipped: no unapplied Search Editor changes');
 			this.notificationService.info(localize('searchEditor.noResultChangesToApply', "No search result changes to apply."));
 			return;
 		}
@@ -265,6 +268,7 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 		const input = this.getInput();
 		const resultsModel = this.searchResultEditor.getModel();
 		if (!input || !resultsModel) {
+			this.searchEditorResultLogService.warn('Open diff skipped: Search Editor input or results model is unavailable');
 			return;
 		}
 
@@ -275,6 +279,7 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 			lines.push(resultLine);
 			linesByResource.set(resultLine.resource, lines);
 		}
+		this.searchEditorResultLogService.info(`Opening Search Editor result diff (mappedFiles=${linesByResource.size}, resultLines=${resultLines.length})`);
 
 		const sourceReferences = new DisposableStore();
 		const previewModels = new DisposableStore();
@@ -312,13 +317,16 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 				computeSearchResultHash(sourceHashText.join('\n')),
 			]);
 			if (resultHash === sourceHash || synchronizedPreviewModels.length === 0) {
+				this.searchEditorResultLogService.info('Open diff skipped after comparison: Search Editor results match source files');
 				this.notificationService.info(localize('searchEditor.noResultChanges', "Search results match the current source files."));
 				return;
 			}
 
 			synchronizer = new SearchEditorDiffModelSynchronizer(resultsModel, () => input.getResultSources(), synchronizedPreviewModels);
+			this.searchEditorResultLogService.info(`Created Search Editor result diff (changedFiles=${synchronizer.resources.value.length})`);
 			synchronizerResourcesListener = synchronizer.resources.onDidChange(() => {
 				const count = synchronizer!.resources.value.length;
+				this.searchEditorResultLogService.debug(`Search Editor result diff resources changed (changedFiles=${count})`);
 				input.setUnappliedChangesCount(count);
 				if (this.getInput() === input) {
 					this.openResultsDiffAction.enabled = count > 0;
@@ -338,6 +346,7 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 				true
 			);
 			const disposeListener = diffInput.onWillDispose(() => {
+				this.searchEditorResultLogService.info('Closed Search Editor result diff');
 				disposeListener.dispose();
 				resolverRegistration?.dispose();
 				synchronizerResourcesListener?.dispose();
@@ -348,9 +357,13 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 			const targetGroup = this.editorGroupService.findGroup({ direction: GroupDirection.RIGHT }, this.group)
 				?? this.editorGroupService.addGroup(this.group, GroupDirection.RIGHT);
 			if (!await this.editorService.openEditor(diffInput, { pinned: true }, targetGroup)) {
+				this.searchEditorResultLogService.warn('Failed to open Search Editor result diff');
 				diffInput.dispose();
+			} else {
+				this.searchEditorResultLogService.info('Opened Search Editor result diff');
 			}
 		} catch (error) {
+			this.searchEditorResultLogService.error('Failed to create Search Editor result diff', error);
 			resolverRegistration?.dispose();
 			synchronizerResourcesListener?.dispose();
 			synchronizer?.dispose();
@@ -407,11 +420,13 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 				}
 
 				if (update === this.resultsDiffUpdate) {
+					this.searchEditorResultLogService.debug(`Compared Search Editor results with source files (mappedFiles=${linesByResource.size}, changedFiles=${changedFileCount})`);
 					this.openResultsDiffAction.enabled = changedFileCount > 0;
 					input.setUnappliedChangesCount(changedFileCount);
 					this.updateUnappliedChangesStatus(changedFileCount);
 				}
 			} catch (error) {
+				this.searchEditorResultLogService.error('Failed to compare Search Editor results with source files', error);
 				this.logService.warn('SearchEditor: Failed to compare search results with source files', error);
 			} finally {
 				sourceReferences.dispose();
