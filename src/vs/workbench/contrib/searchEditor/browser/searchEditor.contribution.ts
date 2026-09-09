@@ -408,6 +408,32 @@ registerAction2(class extends Action2 {
 registerAction2(class extends Action2 {
 	constructor() {
 		super({
+			id: SearchEditorConstants.OpenSearchEditorResultsDiffCommandId,
+			title: localize2('searchEditor.openResultsDiff', 'Open Search Result Changes'),
+			category,
+			f1: true,
+			precondition: SearchEditorConstants.InSearchEditor,
+			keybinding: {
+				primary: KeyMod.CtrlCmd | KeyMod.Alt | KeyCode.KeyS,
+				mac: { primary: KeyMod.WinCtrl | KeyMod.Alt | KeyCode.KeyS },
+				when: SearchEditorConstants.InSearchEditor,
+				weight: KeybindingWeight.EditorContrib,
+			},
+		});
+	}
+
+	run(accessor: ServicesAccessor): Promise<void> | undefined {
+		const editorService = accessor.get(IEditorService);
+		if (editorService.activeEditor instanceof SearchEditorInput) {
+			return (editorService.activeEditorPane as SearchEditor).openResultsDiff();
+		}
+		return undefined;
+	}
+});
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
 			id: FocusQueryEditorWidgetCommandId,
 			title: localize2('search.action.focusQueryEditorWidget', 'Focus Search Editor Input'),
 			category,

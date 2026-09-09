@@ -52,7 +52,7 @@ import { SearchWidget } from '../../search/browser/searchWidget.js';
 import { ITextQueryBuilderOptions, QueryBuilder } from '../../../services/search/common/queryBuilder.js';
 import { getOutOfWorkspaceEditorResources } from '../../search/common/search.js';
 import { SearchModelImpl } from '../../search/browser/searchTreeModel/searchModel.js';
-import { InSearchEditor, SearchEditorID, SearchEditorInputTypeId, SearchConfiguration } from './constants.js';
+import { InSearchEditor, OpenSearchEditorResultsDiffCommandId, SearchEditorID, SearchEditorInputTypeId, SearchConfiguration } from './constants.js';
 import type { SearchEditorInput } from './searchEditorInput.js';
 import { applySearchResultLines, computeSearchResultHash, extractSearchResultSourceLabels, parseSearchResultLines, SearchResultLine, SearchResultSource, serializeSearchResultForEditor } from './searchEditorSerialization.js';
 import { GroupDirection, IEditorGroup, IEditorGroupsService } from '../../../services/editor/common/editorGroupsService.js';
@@ -167,7 +167,7 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 	private createQueryEditor(container: HTMLElement, scopedInstantiationService: IInstantiationService, inputBoxFocusedContextKey: IContextKey<boolean>) {
 		const searchEditorInputboxStyles = getInputBoxStyle({ inputBorder: searchEditorTextInputBorder });
 		this.openResultsDiffAction = this._register(new Action(
-			'searchEditor.openResultsDiff',
+			OpenSearchEditorResultsDiffCommandId,
 			localize('searchEditor.openResultsDiff', "Open Search Result Changes"),
 			ThemeIcon.asClassName(Codicon.diffMultiple),
 			false,
@@ -251,7 +251,12 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 			});
 	}
 
-	private async openResultsDiff(): Promise<void> {
+	async openResultsDiff(): Promise<void> {
+		if (!this.openResultsDiffAction.enabled) {
+			this.notificationService.info(localize('searchEditor.noResultChangesToApply', "No search result changes to apply."));
+			return;
+		}
+
 		const input = this.getInput();
 		const resultsModel = this.searchResultEditor.getModel();
 		if (!input || !resultsModel) {
