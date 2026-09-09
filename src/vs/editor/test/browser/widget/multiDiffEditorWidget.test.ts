@@ -107,6 +107,67 @@ suite('MultiDiffEditorWidget', () => {
 		}
 	});
 
+	test('does not focus the first change added after an empty initial load', async () => {
+		const services = new ServiceCollection();
+		services.set(IAccessibilitySignalService, new class extends mock<IAccessibilitySignalService>() { }());
+		services.set(IActionViewItemService, new NullActionViewItemService());
+		services.set(IEditorProgressService, new class extends mock<IEditorProgressService>() { }());
+		services.set(IDiffProviderFactoryService, new TestDiffProviderFactoryService());
+		services.set(IStorageService, disposables.add(new InMemoryStorageService()));
+		services.set(IMenuService, new class extends mock<IMenuService>() {
+			override createMenu(): IMenu {
+				return new class extends mock<IMenu>() {
+					override readonly onDidChange = Event.None;
+					override getActions() { return []; }
+					override dispose(): void { }
+				}();
+			}
+		}());
+		const instantiationService = createCodeEditorServices(disposables, services);
+		const originalUri = URI.parse('inmemory://original/test.js');
+		const modifiedUri = URI.parse('inmemory://modified/test.js');
+		const original = disposables.add(instantiateTextModel(instantiationService, 'original', undefined, undefined, originalUri));
+		const modified = disposables.add(instantiateTextModel(instantiationService, 'modified', undefined, undefined, modifiedUri));
+		const documentItem = RefCounted.createOfNonDisposable<IDocumentDiffItem>({
+			original: new DiffItemSource(originalUri, original),
+			modified: new DiffItemSource(modifiedUri, modified),
+		}, { dispose() { } });
+		const documents = new ValueWithChangeEvent<readonly RefCounted<IDocumentDiffItem>[]>([]);
+		const model: IMultiDiffEditorModel = { documents };
+		const container = document.createElement('div');
+		const widget = instantiationService.createInstance(
+			MultiDiffEditorWidget,
+			container,
+			{} satisfies IWorkbenchUIElementFactory,
+			{ variant: MultiDiffEditorVariant.Standard },
+		);
+		widget.layout(new Dimension(800, 600));
+		const viewModel = widget.createViewModel(model);
+		widget.setViewModel(viewModel);
+		await waitForState(viewModel.isLoading, isLoading => !isLoading);
+		const focusSpy = sinon.spy(DiffEditorWidget.prototype, 'focus');
+
+		try {
+			documents.value = [documentItem];
+			await waitForState(widget.getLayoutDebugState(), state => state.items[0]?.hasTemplate === true);
+
+			assert.deepStrictEqual({
+				items: widget.getLayoutDebugState().get().items.length,
+				hasActiveControl: widget.getActiveControl() !== undefined,
+				focused: focusSpy.called,
+			}, {
+				items: 1,
+				hasActiveControl: true,
+				focused: false,
+			});
+		} finally {
+			widget.setViewModel(undefined);
+			viewModel.dispose();
+			widget.dispose();
+			documentItem.dispose();
+		}
+	});
+
 	test('renders binary files as a placeholder', async () => {
 		const services = new ServiceCollection();
 		services.set(IAccessibilitySignalService, new class extends mock<IAccessibilitySignalService>() { }());
