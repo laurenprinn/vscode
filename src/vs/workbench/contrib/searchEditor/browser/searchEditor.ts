@@ -35,6 +35,7 @@ import { IContextKey, IContextKeyService } from '../../../../platform/contextkey
 import { IContextViewService } from '../../../../platform/contextview/browser/contextView.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 import { ServiceCollection } from '../../../../platform/instantiation/common/serviceCollection.js';
+import { IKeybindingService } from '../../../../platform/keybinding/common/keybinding.js';
 import { ILabelService } from '../../../../platform/label/common/label.js';
 import { IEditorProgressService, LongRunningOperation } from '../../../../platform/progress/common/progress.js';
 import { IStorageService } from '../../../../platform/storage/common/storage.js';
@@ -156,6 +157,7 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 		@ILanguageService private readonly languageService: ILanguageService,
 		@IMultiDiffSourceResolverService private readonly multiDiffSourceResolverService: IMultiDiffSourceResolverService,
 		@ISearchEditorResultLogService private readonly searchEditorResultLogService: ISearchEditorResultLogService,
+		@IKeybindingService private readonly keybindingService: IKeybindingService,
 	) {
 		super(SearchEditor.ID, group, telemetryService, instantiationService, storageService, textResourceService, themeService, editorService, editorGroupService, fileService);
 		this.container = DOM.$('.search-editor');
@@ -190,7 +192,7 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 		const searchEditorInputboxStyles = getInputBoxStyle({ inputBorder: searchEditorTextInputBorder });
 		this.openResultsDiffAction = this._register(new Action(
 			OpenSearchEditorResultsDiffCommandId,
-			localize('searchEditor.openResultsDiff', "Open Search Result Changes"),
+			this.keybindingService.appendKeybinding(localize('searchEditor.openResultsDiff', "Open Search Result Changes"), OpenSearchEditorResultsDiffCommandId),
 			ThemeIcon.asClassName(Codicon.diffMultiple),
 			false,
 			() => this.openResultsDiff()
