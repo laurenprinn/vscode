@@ -22,6 +22,7 @@ import { SyncDescriptor } from '../../../../platform/instantiation/common/descri
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 import { InstantiationType, registerSingleton } from '../../../../platform/instantiation/common/extensions.js';
 import { KeybindingWeight } from '../../../../platform/keybinding/common/keybindingsRegistry.js';
+import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { Registry } from '../../../../platform/registry/common/platform.js';
 import { EditorPaneDescriptor, IEditorPaneRegistry } from '../../../browser/editor.js';
 import { IWorkbenchContribution, WorkbenchPhase, registerWorkbenchContribution2 } from '../../../common/contributions.js';
@@ -93,6 +94,7 @@ async function applySearchEditorDiffItems(accessor: ServicesAccessor, items: rea
 	const bulkEditService = accessor.get(IBulkEditService);
 	const editorService = accessor.get(IEditorService);
 	const textFileService = accessor.get(ITextFileService);
+	const notificationService = accessor.get(INotificationService);
 	const logService = accessor.get(ISearchEditorResultLogService);
 	const references = new DisposableStore();
 	try {
@@ -126,6 +128,9 @@ async function applySearchEditorDiffItems(accessor: ServicesAccessor, items: rea
 			if (result.isApplied) {
 				await Promise.all(editedResources.map(resource => textFileService.save(resource)));
 				logService.info(`Applied Search Editor result changes (files=${edits.length})`);
+				notificationService.info(edits.length === 1
+					? localize('searchEditor.resultChangesAppliedSingle', "Changes applied to 1 file.")
+					: localize('searchEditor.resultChangesAppliedMultiple', "Changes applied to {0} files.", edits.length));
 				for (const resource of editedResources) {
 					logService.info(`Applied changes to ${resource.toString()}`);
 				}
@@ -149,6 +154,7 @@ async function applySearchEditorDiffText(accessor: ServicesAccessor, resource: U
 	const bulkEditService = accessor.get(IBulkEditService);
 	const editorService = accessor.get(IEditorService);
 	const textFileService = accessor.get(ITextFileService);
+	const notificationService = accessor.get(INotificationService);
 	const logService = accessor.get(ISearchEditorResultLogService);
 	const reference = await textModelService.createModelReference(resource);
 	try {
@@ -167,6 +173,7 @@ async function applySearchEditorDiffText(accessor: ServicesAccessor, resource: U
 		if (result.isApplied) {
 			await textFileService.save(resource);
 			logService.info(`Applied Search Editor result change (${resource.toString()})`);
+			notificationService.info(localize('searchEditor.resultChangesAppliedSingle', "Changes applied to 1 file."));
 			updateVisibleSearchEditors(editorService);
 		} else {
 			logService.warn(`Search Editor result change was not applied (${resource.toString()})`);
