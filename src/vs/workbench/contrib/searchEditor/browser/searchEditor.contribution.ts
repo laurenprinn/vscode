@@ -38,6 +38,7 @@ import { getOrMakeSearchEditorInput, SearchEditorInput, SEARCH_EDITOR_EXT } from
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { VIEW_ID } from '../../../services/search/common/search.js';
 import { searchConfigurationNode } from '../../search/common/search.js';
+import { ITextFileService } from '../../../services/textfile/common/textfiles.js';
 import { RegisteredEditorPriority, IEditorResolverService } from '../../../services/editor/common/editorResolverService.js';
 import { IWorkingCopyEditorHandler, IWorkingCopyEditorService } from '../../../services/workingCopy/common/workingCopyEditorService.js';
 import { IWorkingCopyIdentifier } from '../../../services/workingCopy/common/workingCopy.js';
@@ -91,6 +92,7 @@ async function applySearchEditorDiffItems(accessor: ServicesAccessor, items: rea
 	const textModelService = accessor.get(ITextModelService);
 	const bulkEditService = accessor.get(IBulkEditService);
 	const editorService = accessor.get(IEditorService);
+	const textFileService = accessor.get(ITextFileService);
 	const logService = accessor.get(ISearchEditorResultLogService);
 	const references = new DisposableStore();
 	try {
@@ -122,6 +124,7 @@ async function applySearchEditorDiffItems(accessor: ServicesAccessor, items: rea
 				code: 'undoredo.searchEditor.applyChanges',
 			});
 			if (result.isApplied) {
+				await Promise.all(editedResources.map(resource => textFileService.save(resource)));
 				logService.info(`Applied Search Editor result changes (files=${edits.length})`);
 				for (const resource of editedResources) {
 					logService.info(`Applied changes to ${resource.toString()}`);
@@ -145,6 +148,7 @@ async function applySearchEditorDiffText(accessor: ServicesAccessor, resource: U
 	const textModelService = accessor.get(ITextModelService);
 	const bulkEditService = accessor.get(IBulkEditService);
 	const editorService = accessor.get(IEditorService);
+	const textFileService = accessor.get(ITextFileService);
 	const logService = accessor.get(ISearchEditorResultLogService);
 	const reference = await textModelService.createModelReference(resource);
 	try {
@@ -161,6 +165,7 @@ async function applySearchEditorDiffText(accessor: ServicesAccessor, resource: U
 			code: 'undoredo.searchEditor.applyChange',
 		});
 		if (result.isApplied) {
+			await textFileService.save(resource);
 			logService.info(`Applied Search Editor result change (${resource.toString()})`);
 			updateVisibleSearchEditors(editorService);
 		} else {
