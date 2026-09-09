@@ -116,6 +116,39 @@ suite('SearchEditorDiffModel', () => {
 		assert.deepStrictEqual(synchronizer.resources.value.map(resource => resource.goToFileUri?.path), ['/other.txt']);
 	});
 
+	test('replaces diff models when search results change', () => {
+		const source = URI.file('/file.txt');
+		const otherSource = URI.file('/other.txt');
+		const resultsModel = createTestTextModel('/file.txt:\n  1: changed');
+		const originalModel = createTestTextModel('original');
+		const previewModel = createTestTextModel('changed');
+		const item = new MultiDiffEditorItem(source, URI.parse('search-editor-diff:/file.txt'), source);
+		const synchronizer = disposables.add(new SearchEditorDiffModelSynchronizer(
+			resultsModel,
+			() => [{ label: '/file.txt', resource: source }, { label: '/other.txt', resource: otherSource }],
+			[{ resource: source, originalModel, modifiedModel: previewModel, item }],
+		));
+		const otherOriginalModel = createTestTextModel('other');
+		const otherPreviewModel = createTestTextModel('changed other');
+		const otherItem = new MultiDiffEditorItem(otherSource, URI.parse('search-editor-diff:/other.txt'), otherSource);
+
+		synchronizer.setDiffModels([
+			{ resource: otherSource, originalModel: otherOriginalModel, modifiedModel: otherPreviewModel, item: otherItem },
+		]);
+		let resourceChanges = 0;
+		disposables.add(synchronizer.resources.onDidChange(() => resourceChanges++));
+		originalModel.pushEditOperations(null, [{ range: new Range(1, 1, 1, 9), text: 'changed' }], () => null);
+		otherOriginalModel.pushEditOperations(null, [{ range: new Range(1, 1, 1, 6), text: 'changed other' }], () => null);
+
+		assert.deepStrictEqual({
+			changedResources: synchronizer.resources.value.map(resource => resource.goToFileUri?.path),
+			resourceChanges,
+		}, {
+			changedResources: [],
+			resourceChanges: 1,
+		});
+	});
+
 	test('synchronizes edits after an elided result offset', () => {
 		const source = URI.file('/file.txt');
 		const skippedText = 'x'.repeat(822);

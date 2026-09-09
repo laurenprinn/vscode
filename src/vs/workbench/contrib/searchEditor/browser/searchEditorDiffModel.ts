@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { ValueWithChangeEvent } from '../../../../base/common/event.js';
-import { Disposable } from '../../../../base/common/lifecycle.js';
+import { Disposable, DisposableStore } from '../../../../base/common/lifecycle.js';
 import { ResourceMap } from '../../../../base/common/map.js';
 import { URI } from '../../../../base/common/uri.js';
 import { Range } from '../../../../editor/common/core/range.js';
@@ -23,6 +23,7 @@ export class SearchEditorDiffModelSynchronizer extends Disposable {
 
 	private isUpdating = false;
 	private readonly diffModels = new ResourceMap<SearchEditorDiffModel>();
+	private readonly diffModelDisposables = this._register(new DisposableStore());
 	readonly resources = new ValueWithChangeEvent<readonly MultiDiffEditorItem[]>([]);
 
 	constructor(
@@ -31,12 +32,18 @@ export class SearchEditorDiffModelSynchronizer extends Disposable {
 		previewModels: readonly SearchEditorDiffModel[],
 	) {
 		super();
+		this.setDiffModels(previewModels);
+		this._register(this.resultsModel.onDidChangeContent(() => this.updatePreviewModels()));
+	}
+
+	setDiffModels(previewModels: readonly SearchEditorDiffModel[]): void {
+		this.diffModelDisposables.clear();
+		this.diffModels.clear();
 		for (const diffModel of previewModels) {
 			this.diffModels.set(diffModel.resource, diffModel);
-			this._register(diffModel.originalModel.onDidChangeContent(() => this.updateResources()));
-			this._register(diffModel.modifiedModel.onDidChangeContent(() => this.updateResultsModel(diffModel.modifiedModel)));
+			this.diffModelDisposables.add(diffModel.originalModel.onDidChangeContent(() => this.updateResources()));
+			this.diffModelDisposables.add(diffModel.modifiedModel.onDidChangeContent(() => this.updateResultsModel(diffModel.modifiedModel)));
 		}
-		this._register(this.resultsModel.onDidChangeContent(() => this.updatePreviewModels()));
 		this.updateResources();
 	}
 
