@@ -97,6 +97,7 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 	private includesExcludesContainer!: HTMLElement;
 	private toggleQueryDetailsButton!: HTMLElement;
 	private messageBox!: HTMLElement;
+	private unappliedChangesStatus!: HTMLElement;
 
 	private runSearchDelayer = this._register(new Delayer(0));
 	private pauseSearching: boolean = false;
@@ -177,6 +178,8 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 		));
 
 		this.queryEditorWidget = this._register(scopedInstantiationService.createInstance(SearchWidget, container, { _hideReplaceToggle: true, showContextToggle: true, additionalSearchInputAction: this.openResultsDiffAction, inputBoxStyles: searchEditorInputboxStyles, toggleStyles: defaultToggleStyles }));
+		this.unappliedChangesStatus = DOM.append(container, DOM.$('.search-editor-unapplied-changes-status', { role: 'status', 'aria-live': 'polite' }));
+		this.unappliedChangesStatus.hidden = true;
 		this._register(this.queryEditorWidget.onReplaceToggled(() => this.reLayout()));
 		this._register(this.queryEditorWidget.onDidHeightChange(() => this.reLayout()));
 		this._register(this.queryEditorWidget.onSearchSubmit(({ delay }) => this.triggerSearch({ delay })));
@@ -281,6 +284,7 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 		let diffInput: MultiDiffEditorInput | undefined;
 		let synchronizer: SearchEditorDiffModelSynchronizer | undefined;
 		let resolverRegistration: { dispose(): void } | undefined;
+		let synchronizerResourcesListener: { dispose(): void } | undefined;
 		try {
 			for (const [resource, lines] of linesByResource) {
 				const reference = sourceReferences.add(await this.textModelService.createModelReference(resource));
@@ -313,6 +317,14 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 			}
 
 			synchronizer = new SearchEditorDiffModelSynchronizer(resultsModel, () => input.getResultSources(), synchronizedPreviewModels);
+			synchronizerResourcesListener = synchronizer.resources.onDidChange(() => {
+				const count = synchronizer!.resources.value.length;
+				input.setUnappliedChangesCount(count);
+				if (this.getInput() === input) {
+					this.openResultsDiffAction.enabled = count > 0;
+					this.updateUnappliedChangesStatus(count);
+				}
+			});
 			const multiDiffSource = URI.from({ scheme: SearchEditorDiffScheme, path: `/search-result-changes-${generateUuid()}` });
 			resolverRegistration = this.multiDiffSourceResolverService.registerResolver({
 				canHandleUri: uri => isEqual(uri, multiDiffSource),
@@ -328,6 +340,7 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 			const disposeListener = diffInput.onWillDispose(() => {
 				disposeListener.dispose();
 				resolverRegistration?.dispose();
+				synchronizerResourcesListener?.dispose();
 				synchronizer?.dispose();
 				previewModels.dispose();
 				sourceReferences.dispose();
@@ -339,6 +352,7 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 			}
 		} catch (error) {
 			resolverRegistration?.dispose();
+			synchronizerResourcesListener?.dispose();
 			synchronizer?.dispose();
 			previewModels.dispose();
 			sourceReferences.dispose();
@@ -373,27 +387,28 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 
 			const sourceReferences = new DisposableStore();
 			try {
-				const resultHashText: string[] = [];
-				const sourceHashText: string[] = [];
+				let changedFileCount = 0;
 				for (const [resource, lines] of linesByResource) {
 					const reference = sourceReferences.add(await this.textModelService.createModelReference(resource));
 					const sourceModel = reference.object.textEditorModel;
+					let hasChanges = false;
 					for (const line of lines) {
 						if (line.sourceLineNumber > sourceModel.getLineCount()) {
 							continue;
 						}
-						const hashKey = `${resource.toString()}\0${line.sourceLineNumber}\0`;
-						resultHashText.push(hashKey + line.text);
-						sourceHashText.push(hashKey + sourceModel.getLineContent(line.sourceLineNumber));
+						if (line.text !== sourceModel.getLineContent(line.sourceLineNumber)) {
+							hasChanges = true;
+						}
+					}
+					if (hasChanges) {
+						changedFileCount++;
 					}
 				}
 
-				const [resultHash, sourceHash] = await Promise.all([
-					computeSearchResultHash(resultHashText.join('\n')),
-					computeSearchResultHash(sourceHashText.join('\n')),
-				]);
 				if (update === this.resultsDiffUpdate) {
-					this.openResultsDiffAction.enabled = resultHashText.length > 0 && resultHash !== sourceHash;
+					this.openResultsDiffAction.enabled = changedFileCount > 0;
+					input.setUnappliedChangesCount(changedFileCount);
+					this.updateUnappliedChangesStatus(changedFileCount);
 				}
 			} catch (error) {
 				this.logService.warn('SearchEditor: Failed to compare search results with source files', error);
@@ -401,6 +416,13 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 				sourceReferences.dispose();
 			}
 		});
+	}
+
+	private updateUnappliedChangesStatus(count: number): void {
+		this.unappliedChangesStatus.hidden = count === 0;
+		this.unappliedChangesStatus.textContent = count === 1
+			? localize('searchEditor.unappliedChangeStatus', "1 file with unapplied changes")
+			: localize('searchEditor.unappliedChangesStatus', "{0} files with unapplied changes", count);
 	}
 
 	updateResultsDiffAction(): void {
@@ -943,6 +965,7 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 		if (token.isCancellationRequested) { return; }
 
 		this.searchResultEditor.setModel(resultsModel);
+		this.updateUnappliedChangesStatus(newInput.getUnappliedChangesCount());
 		this.updateOpenResultsDiffAction();
 		this.pauseSearching = true;
 

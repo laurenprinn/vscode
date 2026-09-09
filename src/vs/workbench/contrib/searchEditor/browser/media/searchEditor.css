@@ -88,6 +88,16 @@
 	flex: 0 0 var(--vscode-spacing-size240);
 }
 
+.search-editor .search-editor-unapplied-changes-status {
+	margin: var(--vscode-spacing-size40) var(--vscode-spacing-size280) 0;
+	color: var(--vscode-descriptionForeground);
+	font-size: var(--vscode-fontSize-label2);
+	font-weight: var(--vscode-fontWeight-regular);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
 .search-editor .search-widget .replace-container {
 	margin-top: 6px;
 	position: relative;

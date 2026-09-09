@@ -67,6 +67,7 @@ export class SearchEditorInput extends EditorInput {
 	private memento: Memento<{ searchConfig: SearchConfiguration }>;
 
 	private dirty: boolean = false;
+	private unappliedChangesCount = 0;
 
 	private lastLabel: string | undefined;
 
@@ -208,17 +209,36 @@ export class SearchEditorInput extends EditorInput {
 
 	override getName(maxLength = 12): string {
 		const trimToMax = (label: string) => (label.length < maxLength ? label : `${label.slice(0, maxLength - 3)}...`);
+		let name: string;
 
 		if (this.backingUri) {
 			const originalURI = EditorResourceAccessor.getOriginalUri(this);
-			return localize('searchTitle.withQuery', "Search: {0}", basename((originalURI ?? this.backingUri).path, SEARCH_EDITOR_EXT));
+			name = localize('searchTitle.withQuery', "Search: {0}", basename((originalURI ?? this.backingUri).path, SEARCH_EDITOR_EXT));
+		} else {
+			const query = this._cachedConfigurationModel?.config?.query?.trim();
+			name = query
+				? localize('searchTitle.withQuery', "Search: {0}", trimToMax(query))
+				: localize('searchTitle', "Search");
 		}
 
-		const query = this._cachedConfigurationModel?.config?.query?.trim();
-		if (query) {
-			return localize('searchTitle.withQuery', "Search: {0}", trimToMax(query));
+		if (this.unappliedChangesCount === 1) {
+			return localize('searchEditor.unappliedChangeTitle', "{0} - 1 file with unapplied changes", name);
 		}
-		return localize('searchTitle', "Search");
+		if (this.unappliedChangesCount > 1) {
+			return localize('searchEditor.unappliedChangesTitle', "{0} - {1} files with unapplied changes", name, this.unappliedChangesCount);
+		}
+		return name;
+	}
+
+	setUnappliedChangesCount(count: number): void {
+		if (this.unappliedChangesCount !== count) {
+			this.unappliedChangesCount = count;
+			this._onDidChangeLabel.fire();
+		}
+	}
+
+	getUnappliedChangesCount(): number {
+		return this.unappliedChangesCount;
 	}
 
 	setDirty(dirty: boolean) {
