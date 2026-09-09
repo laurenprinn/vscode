@@ -3,11 +3,16 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { Codicon } from '../../../../base/common/codicons.js';
 import { KeyCode, KeyMod } from '../../../../base/common/keyCodes.js';
+import { Disposable, DisposableStore } from '../../../../base/common/lifecycle.js';
 import { extname, isEqual } from '../../../../base/common/resources.js';
 import { URI } from '../../../../base/common/uri.js';
 import { ServicesAccessor } from '../../../../editor/browser/editorExtensions.js';
+import { IBulkEditService, ResourceTextEdit } from '../../../../editor/browser/services/bulkEditService.js';
+import { DiffEditorSelectionHunkToolbarContext } from '../../../../editor/browser/widget/diffEditor/features/gutterFeature.js';
 import { Range } from '../../../../editor/common/core/range.js';
+import { ITextModelService } from '../../../../editor/common/services/resolverService.js';
 import { ToggleCaseSensitiveKeybinding, ToggleRegexKeybinding, ToggleWholeWordKeybinding } from '../../../../editor/contrib/find/browser/findModel.js';
 import { localize, localize2 } from '../../../../nls.js';
 import { Action2, MenuId, registerAction2 } from '../../../../platform/actions/common/actions.js';
@@ -20,7 +25,7 @@ import { Registry } from '../../../../platform/registry/common/platform.js';
 import { EditorPaneDescriptor, IEditorPaneRegistry } from '../../../browser/editor.js';
 import { IWorkbenchContribution, WorkbenchPhase, registerWorkbenchContribution2 } from '../../../common/contributions.js';
 import { IEditorSerializer, IEditorFactoryRegistry, EditorExtensions, DEFAULT_EDITOR_ASSOCIATION } from '../../../common/editor.js';
-import { ActiveEditorContext } from '../../../common/contextkeys.js';
+import { ActiveEditorContext, ResourceContextKey } from '../../../common/contextkeys.js';
 import { IViewsService } from '../../../services/views/common/viewsService.js';
 import { getSearchView } from '../../search/browser/searchActionsBase.js';
 import { searchNewEditorIcon, searchRefreshIcon } from '../../search/browser/searchIcons.js';
@@ -34,12 +39,15 @@ import { VIEW_ID } from '../../../services/search/common/search.js';
 import { searchConfigurationNode } from '../../search/common/search.js';
 import { RegisteredEditorPriority, IEditorResolverService } from '../../../services/editor/common/editorResolverService.js';
 import { IWorkingCopyEditorHandler, IWorkingCopyEditorService } from '../../../services/workingCopy/common/workingCopyEditorService.js';
-import { Disposable } from '../../../../base/common/lifecycle.js';
 import { IWorkingCopyIdentifier } from '../../../services/workingCopy/common/workingCopy.js';
 import { EditorInput } from '../../../common/editor/editorInput.js';
 import { getActiveElement } from '../../../../base/browser/dom.js';
 import * as nls from '../../../../nls.js';
 import { Extensions as ConfigurationExtensions, IConfigurationRegistry } from '../../../../platform/configuration/common/configurationRegistry.js';
+import { MultiDiffEditor } from '../../multiDiffEditor/browser/multiDiffEditor.js';
+import { MultiDiffEditorInput } from '../../multiDiffEditor/browser/multiDiffEditorInput.js';
+import { MultiDiffEditorItem } from '../../multiDiffEditor/browser/multiDiffSourceResolverService.js';
+import { SearchEditorDiffContentProvider, SearchEditorDiffScheme } from './searchEditorDiffModel.js';
 
 
 const OpenInEditorCommandId = 'search.action.openInEditor';
@@ -57,6 +65,87 @@ const DecreaseSearchEditorContextLinesCommandId = 'decreaseSearchEditorContextLi
 const RerunSearchEditorSearchCommandId = 'rerunSearchEditorSearch';
 const CleanSearchEditorStateCommandId = 'cleanSearchEditorState';
 const SelectAllSearchEditorMatchesCommandId = 'selectAllSearchEditorMatches';
+
+const inSearchEditorDiff = ContextKeyExpr.and(
+	ActiveEditorContext.isEqualTo(MultiDiffEditor.ID),
+	ResourceContextKey.Scheme.isEqualTo(SearchEditorDiffScheme),
+);
+
+function getActiveSearchEditorDiffInput(editorService: IEditorService): MultiDiffEditorInput | undefined {
+	const input = editorService.activeEditor;
+	return input instanceof MultiDiffEditorInput && input.resource?.scheme === SearchEditorDiffScheme ? input : undefined;
+}
+
+function updateVisibleSearchEditors(editorService: IEditorService): void {
+	for (const pane of editorService.visibleEditorPanes) {
+		if (pane instanceof SearchEditor) {
+			pane.updateResultsDiffAction();
+		}
+	}
+}
+
+async function applySearchEditorDiffItems(accessor: ServicesAccessor, items: readonly MultiDiffEditorItem[], label: string): Promise<void> {
+	const textModelService = accessor.get(ITextModelService);
+	const bulkEditService = accessor.get(IBulkEditService);
+	const editorService = accessor.get(IEditorService);
+	const references = new DisposableStore();
+	try {
+		const edits: ResourceTextEdit[] = [];
+		for (const item of items) {
+			if (!item.originalUri || !item.modifiedUri || item.modifiedUri.scheme !== SearchEditorDiffScheme) {
+				continue;
+			}
+
+			const originalReference = references.add(await textModelService.createModelReference(item.originalUri));
+			const modifiedReference = references.add(await textModelService.createModelReference(item.modifiedUri));
+			const originalModel = originalReference.object.textEditorModel;
+			const modifiedModel = modifiedReference.object.textEditorModel;
+			if (originalModel.getValue() !== modifiedModel.getValue()) {
+				edits.push(new ResourceTextEdit(
+					item.originalUri,
+					{ range: originalModel.getFullModelRange(), text: modifiedModel.getValue() },
+					originalModel.getVersionId(),
+				));
+			}
+		}
+
+		if (edits.length > 0) {
+			const result = await bulkEditService.apply(edits, {
+				label,
+				code: 'undoredo.searchEditor.applyChanges',
+			});
+			if (result.isApplied) {
+				updateVisibleSearchEditors(editorService);
+			}
+		}
+	} finally {
+		references.dispose();
+	}
+}
+
+async function applySearchEditorDiffText(accessor: ServicesAccessor, resource: URI, text: string, label: string): Promise<void> {
+	const textModelService = accessor.get(ITextModelService);
+	const bulkEditService = accessor.get(IBulkEditService);
+	const editorService = accessor.get(IEditorService);
+	const reference = await textModelService.createModelReference(resource);
+	try {
+		const model = reference.object.textEditorModel;
+		if (model.getValue() === text) {
+			return;
+		}
+		const result = await bulkEditService.apply([
+			new ResourceTextEdit(resource, { range: model.getFullModelRange(), text }, model.getVersionId()),
+		], {
+			label,
+			code: 'undoredo.searchEditor.applyChange',
+		});
+		if (result.isApplied) {
+			updateVisibleSearchEditors(editorService);
+		}
+	} finally {
+		reference.dispose();
+	}
+}
 
 
 //#region Search Editor Configuration
@@ -434,6 +523,94 @@ registerAction2(class extends Action2 {
 registerAction2(class extends Action2 {
 	constructor() {
 		super({
+			id: 'searchEditor.applyResultChange',
+			title: localize2('searchEditor.applyResultChange', 'Apply Change'),
+			icon: Codicon.arrowLeft,
+			f1: false,
+			precondition: inSearchEditorDiff,
+			menu: [MenuId.DiffEditorHunkToolbar, MenuId.DiffEditorSelectionToolbar].map(id => ({
+				id,
+				when: inSearchEditorDiff,
+				group: 'primary',
+				order: 1,
+			})),
+		});
+	}
+
+	run(accessor: ServicesAccessor, ...args: unknown[]): Promise<void> | undefined {
+		const context = args[0] as DiffEditorSelectionHunkToolbarContext | undefined;
+		if (!context || context.modifiedUri.scheme !== SearchEditorDiffScheme) {
+			return undefined;
+		}
+		return applySearchEditorDiffText(
+			accessor,
+			context.originalUri,
+			context.originalWithModifiedChanges,
+			localize('searchEditor.applyResultChange.label', "Apply Search Result Change"),
+		);
+	}
+});
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: 'searchEditor.applyFileResultChanges',
+			title: localize2('searchEditor.applyFileResultChanges', 'Apply File Changes'),
+			icon: Codicon.check,
+			f1: false,
+			precondition: inSearchEditorDiff,
+			menu: {
+				id: MenuId.MultiDiffEditorFileToolbar,
+				when: inSearchEditorDiff,
+				group: 'navigation',
+				order: 1,
+			},
+		});
+	}
+
+	run(accessor: ServicesAccessor, ...args: unknown[]): Promise<void> | undefined {
+		const resource = args[0];
+		if (!(resource instanceof URI)) {
+			return undefined;
+		}
+		const input = getActiveSearchEditorDiffInput(accessor.get(IEditorService));
+		const item = input?.initialResources?.find(item => item.modifiedUri && isEqual(item.modifiedUri, resource));
+		if (!item) {
+			return undefined;
+		}
+		return applySearchEditorDiffItems(accessor, [item], localize('searchEditor.applyFileResultChanges.label', "Apply Search Result File Changes"));
+	}
+});
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: 'searchEditor.applyAllResultChanges',
+			title: localize2('searchEditor.applyAllResultChanges', 'Apply All Changes'),
+			icon: Codicon.checkAll,
+			f1: false,
+			precondition: inSearchEditorDiff,
+			menu: [MenuId.EditorTitle, MenuId.CompactWindowEditorTitle].map(id => ({
+				id,
+				when: inSearchEditorDiff,
+				group: 'navigation',
+				order: 0,
+			})),
+		});
+	}
+
+	run(accessor: ServicesAccessor): Promise<void> | undefined {
+		const input = getActiveSearchEditorDiffInput(accessor.get(IEditorService));
+		if (!input?.initialResources) {
+			return undefined;
+		}
+		return applySearchEditorDiffItems(accessor, input.initialResources, localize('searchEditor.applyAllResultChanges.label', "Apply All Search Result Changes"));
+	}
+});
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
 			id: FocusQueryEditorWidgetCommandId,
 			title: localize2('search.action.focusQueryEditorWidget', 'Focus Search Editor Input'),
 			category,
@@ -678,4 +855,5 @@ class SearchEditorWorkingCopyEditorHandler extends Disposable implements IWorkbe
 }
 
 registerWorkbenchContribution2(SearchEditorWorkingCopyEditorHandler.ID, SearchEditorWorkingCopyEditorHandler, WorkbenchPhase.BlockRestore);
+registerWorkbenchContribution2(SearchEditorDiffContentProvider.ID, SearchEditorDiffContentProvider, WorkbenchPhase.BlockStartup);
 //#endregion

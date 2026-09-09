@@ -75,6 +75,7 @@ import { IHoverService } from '../../../../platform/hover/browser/hover.js';
 import { ISearchResult } from '../../search/browser/searchTreeModel/searchTreeCommon.js';
 import { MultiDiffEditorInput } from '../../multiDiffEditor/browser/multiDiffEditorInput.js';
 import { MultiDiffEditorItem } from '../../multiDiffEditor/browser/multiDiffSourceResolverService.js';
+import { SearchEditorDiffScheme } from './searchEditorDiffModel.js';
 
 const RESULT_LINE_REGEX = /^(\s+)(\d+)(: |  )(\s*)(.*)$/;
 const FILE_LINE_REGEX = /^(\S.*):$/;
@@ -294,7 +295,7 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 
 				const { lines: modifiedLines, changed } = applySearchResultLines(sourceModel.getLinesContent(), lines);
 				if (changed) {
-					const previewUri = URI.from({ scheme: Schemas.inMemory, authority: generateUuid(), path: resource.path });
+					const previewUri = URI.from({ scheme: SearchEditorDiffScheme, authority: generateUuid(), path: resource.path });
 					previewModels.add(this.modelService.createModel(modifiedLines.join(sourceModel.getEOL()), this.languageService.createById(sourceModel.getLanguageId()), previewUri));
 					items.push(new MultiDiffEditorItem(resource, previewUri, resource));
 				}
@@ -311,7 +312,7 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 
 			diffInput = this.instantiationService.createInstance(
 				MultiDiffEditorInput,
-				URI.from({ scheme: 'multi-diff-editor', path: `search-result-changes-${generateUuid()}` }),
+				URI.from({ scheme: SearchEditorDiffScheme, path: `/search-result-changes-${generateUuid()}` }),
 				localize('searchEditor.resultChanges', "Search Result Changes"),
 				items,
 				true
@@ -385,6 +386,10 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 				sourceReferences.dispose();
 			}
 		});
+	}
+
+	updateResultsDiffAction(): void {
+		this.updateOpenResultsDiffAction();
 	}
 
 	private resolveResultSources(input: SearchEditorInput, text: string): SearchResultSource[] {
