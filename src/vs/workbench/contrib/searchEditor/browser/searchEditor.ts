@@ -33,6 +33,7 @@ import { ICommandService } from '../../../../platform/commands/common/commands.j
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { IContextKey, IContextKeyService } from '../../../../platform/contextkey/common/contextkey.js';
 import { IContextViewService } from '../../../../platform/contextview/browser/contextView.js';
+import { IDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 import { ServiceCollection } from '../../../../platform/instantiation/common/serviceCollection.js';
 import { IKeybindingService } from '../../../../platform/keybinding/common/keybinding.js';
@@ -131,6 +132,7 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 	private openResultsDiffAction!: Action;
 	private resultsDiffUpdate = 0;
 	private readonly resultsDiffInputs = new Map<MultiDiffEditorInput, SearchEditorDiffSession>();
+	private confirmedUnappliedChanges: { input: SearchEditorInput; versionId: number } | undefined;
 
 	constructor(
 		group: IEditorGroup,
@@ -158,6 +160,7 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 		@IMultiDiffSourceResolverService private readonly multiDiffSourceResolverService: IMultiDiffSourceResolverService,
 		@ISearchEditorResultLogService private readonly searchEditorResultLogService: ISearchEditorResultLogService,
 		@IKeybindingService private readonly keybindingService: IKeybindingService,
+		@IDialogService private readonly dialogService: IDialogService,
 	) {
 		super(SearchEditor.ID, group, telemetryService, instantiationService, storageService, textResourceService, themeService, editorService, editorGroupService, fileService);
 		this.container = DOM.$('.search-editor');
@@ -427,38 +430,11 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 				return;
 			}
 
-			const resultSources = this.resolveResultSources(input, resultsModel.getValue());
-			input.setResultSources(resultSources);
-			const linesByResource = new ResourceMap<SearchResultLine[]>();
-			for (const resultLine of parseSearchResultLines(resultsModel.getValue(), resultSources)) {
-				const lines = linesByResource.get(resultLine.resource) ?? [];
-				lines.push(resultLine);
-				linesByResource.set(resultLine.resource, lines);
-			}
-
-			const sourceReferences = new DisposableStore();
 			try {
-				let changedFileCount = 0;
-				for (const [resource, lines] of linesByResource) {
-					const reference = sourceReferences.add(await this.textModelService.createModelReference(resource));
-					const sourceModel = reference.object.textEditorModel;
-					let hasChanges = false;
-					for (const line of lines) {
-						if (line.sourceLineNumber > sourceModel.getLineCount()) {
-							continue;
-						}
-						const sourceText = sourceModel.getLineContent(line.sourceLineNumber);
-						if (resolveSearchResultLineText(sourceText, line.text) !== sourceText) {
-							hasChanges = true;
-						}
-					}
-					if (hasChanges) {
-						changedFileCount++;
-					}
-				}
+				const { mappedFileCount, changedFileCount } = await this.getUnappliedChangesCount(input, resultsModel);
 
 				if (update === this.resultsDiffUpdate) {
-					this.searchEditorResultLogService.debug(`Compared Search Editor results with source files (mappedFiles=${linesByResource.size}, changedFiles=${changedFileCount})`);
+					this.searchEditorResultLogService.debug(`Compared Search Editor results with source files (mappedFiles=${mappedFileCount}, changedFiles=${changedFileCount})`);
 					this.openResultsDiffAction.enabled = changedFileCount > 0;
 					input.setUnappliedChangesCount(changedFileCount);
 					this.updateUnappliedChangesStatus(changedFileCount);
@@ -466,10 +442,41 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 			} catch (error) {
 				this.searchEditorResultLogService.error('Failed to compare Search Editor results with source files', error);
 				this.logService.warn('SearchEditor: Failed to compare search results with source files', error);
-			} finally {
-				sourceReferences.dispose();
 			}
 		});
+	}
+
+	private async getUnappliedChangesCount(input: SearchEditorInput, resultsModel: ITextModel): Promise<{ mappedFileCount: number; changedFileCount: number }> {
+		const resultSources = this.resolveResultSources(input, resultsModel.getValue());
+		input.setResultSources(resultSources);
+		const linesByResource = new ResourceMap<SearchResultLine[]>();
+		for (const resultLine of parseSearchResultLines(resultsModel.getValue(), resultSources)) {
+			const lines = linesByResource.get(resultLine.resource) ?? [];
+			lines.push(resultLine);
+			linesByResource.set(resultLine.resource, lines);
+		}
+
+		const sourceReferences = new DisposableStore();
+		try {
+			let changedFileCount = 0;
+			for (const [resource, lines] of linesByResource) {
+				const reference = sourceReferences.add(await this.textModelService.createModelReference(resource));
+				const sourceModel = reference.object.textEditorModel;
+				for (const line of lines) {
+					if (line.sourceLineNumber > sourceModel.getLineCount()) {
+						continue;
+					}
+					const sourceText = sourceModel.getLineContent(line.sourceLineNumber);
+					if (resolveSearchResultLineText(sourceText, line.text) !== sourceText) {
+						changedFileCount++;
+						break;
+					}
+				}
+			}
+			return { mappedFileCount: linesByResource.size, changedFileCount };
+		} finally {
+			sourceReferences.dispose();
+		}
 	}
 
 	private async refreshResultsDiffs(input: SearchEditorInput, resultsModel: ITextModel): Promise<void> {
@@ -836,6 +843,9 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 
 		if (!this.pauseSearching) {
 			await this.runSearchDelayer.trigger(async () => {
+				if (!await this.confirmSearchWithUnappliedChanges()) {
+					return;
+				}
 				this.toggleRunAgainMessage(false);
 				await this.doRunSearch();
 				if (options.resetCursor) {
@@ -847,6 +857,34 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 				}
 			}, options.delay);
 		}
+	}
+
+	private async confirmSearchWithUnappliedChanges(): Promise<boolean> {
+		const input = this.getInput();
+		const resultsModel = this.searchResultEditor.getModel();
+		if (!input?.isDirty() || !resultsModel) {
+			return true;
+		}
+
+		const { changedFileCount } = await this.getUnappliedChangesCount(input, resultsModel);
+		if (changedFileCount === 0) {
+			return true;
+		}
+
+		if (this.confirmedUnappliedChanges?.input === input && this.confirmedUnappliedChanges.versionId === resultsModel.getVersionId()) {
+			return true;
+		}
+
+		const { confirmed } = await this.dialogService.confirm({
+			type: 'warning',
+			message: localize('searchEditor.confirmSearchWithUnappliedChanges', "Start a new search?"),
+			detail: localize('searchEditor.confirmSearchWithUnappliedChangesDetail', "This Search Editor has unapplied changes that will be lost unless you save it before starting a new search."),
+			primaryButton: localize('searchEditor.startNewSearch', "Start New Search"),
+		});
+		if (confirmed) {
+			this.confirmedUnappliedChanges = { input, versionId: resultsModel.getVersionId() };
+		}
+		return confirmed;
 	}
 
 	private readConfigFromWidget(): SearchConfiguration {
