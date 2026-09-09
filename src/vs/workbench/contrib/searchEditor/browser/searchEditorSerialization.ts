@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { coalesce } from '../../../../base/common/arrays.js';
+import { encodeHex, VSBuffer } from '../../../../base/common/buffer.js';
 import { URI } from '../../../../base/common/uri.js';
 import './media/searchEditor.css';
 import { ServicesAccessor } from '../../../../editor/browser/editorExtensions.js';
@@ -161,6 +162,13 @@ export const serializeSearchConfiguration = (config: Partial<SearchConfiguration
 	]).join(lineDelimiter);
 };
 
+export const serializeSearchResultHash = (resultHash: string): string => `# ResultHash: ${resultHash}`;
+
+export const computeSearchResultHash = async (text: string): Promise<string> => {
+	const resultHashBuffer = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+	return encodeHex(VSBuffer.wrap(new Uint8Array(resultHashBuffer)));
+};
+
 export const extractSearchQueryFromModel = (model: ITextModel): SearchConfiguration =>
 	extractSearchQueryFromLines(model.getValueInRange(new Range(1, 1, 6, 1)).split(lineDelimiter));
 
@@ -236,13 +244,20 @@ export const extractSearchQueryFromLines = (lines: string[]): SearchConfiguratio
 };
 
 export const serializeSearchResultForEditor =
-	(searchResult: ISearchResult, rawIncludePattern: string, rawExcludePattern: string, contextLines: number, labelFormatter: (x: URI) => string, sortOrder: SearchSortOrder, limitHit?: boolean): { matchRanges: Range[]; text: string; config: Partial<SearchConfiguration> } => {
+	async (searchResult: ISearchResult, rawIncludePattern: string, rawExcludePattern: string, contextLines: number, labelFormatter: (x: URI) => string, sortOrder: SearchSortOrder, limitHit?: boolean): Promise<{ matchRanges: Range[]; text: string; config: Partial<SearchConfiguration>; resultHash: string }> => {
 		if (!searchResult.query) { throw Error('Internal Error: Expected query, got null'); }
 		const config = contentPatternToSearchConfiguration(searchResult.query, rawIncludePattern, rawExcludePattern, contextLines);
 
 		const filecount = searchResult.fileCount() > 1 ? localize('numFiles', "{0} files", searchResult.fileCount()) : localize('oneFile', "1 file");
 		const resultcount = searchResult.count() > 1 ? localize('numResults', "{0} results", searchResult.count()) : localize('oneResult', "1 result");
 
+		const matchComparer = (a: ISearchTreeFileMatch | ISearchTreeFolderMatch, b: ISearchTreeFileMatch | ISearchTreeFolderMatch) => searchMatchComparer(a, b, sortOrder);
+
+		const allResults =
+			flattenSearchResultSerializations(
+				searchResult.folderMatches().sort(matchComparer)
+					.map(folderMatch => folderMatch.allDownstreamFileMatches().sort(matchComparer)
+						.flatMap(fileMatch => fileMatchToSearchResultFormat(fileMatch, labelFormatter))).flat());
 		const info = [
 			searchResult.count()
 				? `${resultcount} - ${filecount}`
@@ -252,19 +267,13 @@ export const serializeSearchResultForEditor =
 			info.push(localize('searchMaxResultsWarning', "The result set only contains a subset of all matches. Be more specific in your search to narrow down the results."));
 		}
 		info.push('');
-
-		const matchComparer = (a: ISearchTreeFileMatch | ISearchTreeFolderMatch, b: ISearchTreeFileMatch | ISearchTreeFolderMatch) => searchMatchComparer(a, b, sortOrder);
-
-		const allResults =
-			flattenSearchResultSerializations(
-				searchResult.folderMatches().sort(matchComparer)
-					.map(folderMatch => folderMatch.allDownstreamFileMatches().sort(matchComparer)
-						.flatMap(fileMatch => fileMatchToSearchResultFormat(fileMatch, labelFormatter))).flat());
+		const text = info.concat(allResults.text).join(lineDelimiter);
 
 		return {
 			matchRanges: allResults.matchRanges.map(translateRangeLines(info.length)),
-			text: info.concat(allResults.text).join(lineDelimiter),
-			config
+			text,
+			config,
+			resultHash: await computeSearchResultHash(text)
 		};
 	};
 
@@ -304,5 +313,8 @@ export const parseSerializedSearchEditor = (text: string) => {
 		}
 	}
 
-	return { config: extractSearchQueryFromLines(headerlines), text: bodylines.join('\n') };
+	const resultHashPattern = /^# ResultHash: (?<hash>[a-f0-9]{64})$/;
+	const resultHash = headerlines.map(line => resultHashPattern.exec(line)?.groups?.hash).find(hash => hash !== undefined);
+
+	return { config: extractSearchQueryFromLines(headerlines), text: bodylines.join('\n'), resultHash };
 };

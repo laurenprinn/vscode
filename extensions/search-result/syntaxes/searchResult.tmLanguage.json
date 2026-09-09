@@ -67,6 +67,18 @@
       ]
     },
     {
+      "match": "^(# ResultHash): ([a-f0-9]{64})$",
+      "name": "meta.header.search keyword.operator.word.search",
+      "captures": {
+        "1": {
+          "name": "entity.other.attribute-name"
+        },
+        "2": {
+          "name": "entity.other.attribute-value string.unquoted"
+        }
+      }
+    },
+    {
       "match": "^(# (?:Including|Excluding)): (.*)$",
       "name": "meta.header.search keyword.operator.word.search",
       "captures": {

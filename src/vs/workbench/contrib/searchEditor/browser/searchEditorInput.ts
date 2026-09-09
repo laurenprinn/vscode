@@ -20,7 +20,7 @@ import { GroupIdentifier, IRevertOptions, ISaveOptions, EditorResourceAccessor, 
 import { Memento } from '../../../common/memento.js';
 import { SearchEditorFindMatchClass, SearchEditorInputTypeId, SearchEditorScheme, SearchEditorWorkingCopyTypeId, SearchConfiguration } from './constants.js';
 import { SearchConfigurationModel, SearchEditorModel, searchEditorModelFactory } from './searchEditorModel.js';
-import { defaultSearchConfig, parseSavedSearchEditor, serializeSearchConfiguration } from './searchEditorSerialization.js';
+import { computeSearchResultHash, defaultSearchConfig, parseSavedSearchEditor, serializeSearchConfiguration, serializeSearchResultHash } from './searchEditorSerialization.js';
 import { IPathService } from '../../../services/path/common/pathService.js';
 import { ITextFileSaveOptions, ITextFileService } from '../../../services/textfile/common/textfiles.js';
 import { IWorkingCopyService } from '../../../services/workingCopy/common/workingCopyService.js';
@@ -77,6 +77,8 @@ export class SearchEditorInput extends EditorInput {
 	readonly onDidSave: Event<IWorkingCopySaveEvent> = this._onDidSave.event;
 
 	private oldDecorationsIDs: string[] = [];
+	private resultHash: string | undefined;
+	private resultHashUpdate = 0;
 
 	get resource() {
 		return this.backingUri || this.modelUri;
@@ -149,7 +151,9 @@ export class SearchEditorInput extends EditorInput {
 
 	private async serializeForDisk() {
 		const { configurationModel, resultsModel } = await this.resolveModels();
-		return serializeSearchConfiguration(configurationModel.config) + '\n' + resultsModel.getValue();
+		const resultsText = resultsModel.getValue();
+		const serializedResultHash = serializeSearchResultHash(await computeSearchResultHash(resultsText));
+		return serializeSearchConfiguration(configurationModel.config) + serializedResultHash + '\n\n' + resultsText;
 	}
 
 	private configChangeListenerDisposable: IDisposable | undefined;
@@ -169,8 +173,12 @@ export class SearchEditorInput extends EditorInput {
 
 	async resolveModels() {
 		return this.model.resolve().then(data => {
+			const isFirstResolve = this._cachedResultsModel === undefined;
 			this._cachedResultsModel = data.resultsModel;
 			this._cachedConfigurationModel = data.configurationModel;
+			if (isFirstResolve && data.resultHash !== undefined) {
+				this.setResultHash(data.resultHash);
+			}
 			if (this.lastLabel !== this.getName()) {
 				this._onDidChangeLabel.fire();
 				this.lastLabel = this.getName();
@@ -227,6 +235,19 @@ export class SearchEditorInput extends EditorInput {
 		}
 	}
 
+	setResultHash(resultHash: string | undefined): void {
+		this.resultHashUpdate++;
+		this.resultHash = resultHash;
+	}
+
+	async updateResultHash(text: string): Promise<void> {
+		const update = ++this.resultHashUpdate;
+		const resultHash = await computeSearchResultHash(text);
+		if (update === this.resultHashUpdate) {
+			this.resultHash = resultHash;
+		}
+	}
+
 	override isDirty() {
 		return this.dirty;
 	}
@@ -276,10 +297,11 @@ export class SearchEditorInput extends EditorInput {
 		}
 
 		if (this.backingUri) {
-			const { config, text } = await this.instantiationService.invokeFunction(parseSavedSearchEditor, this.backingUri);
+			const { config, text, resultHash } = await this.instantiationService.invokeFunction(parseSavedSearchEditor, this.backingUri);
 			const { resultsModel, configurationModel } = await this.resolveModels();
 			resultsModel.setValue(text);
 			configurationModel.updateConfig(config);
+			this.setResultHash(resultHash);
 		} else {
 			(await this.resolveModels()).resultsModel.setValue('');
 		}
@@ -323,11 +345,13 @@ export class SearchEditorInput extends EditorInput {
 		const config = this._cachedConfigurationModel?.config ?? {};
 		const results = this._cachedResultsModel?.getValue() ?? '';
 		// Use the 'rawData' variant and pass modelUri
-		return this.instantiationService.invokeFunction(
+		const input = this.instantiationService.invokeFunction(
 			getOrMakeSearchEditorInput,
 			// eslint-disable-next-line local/code-no-any-casts
 			{ from: 'rawData', config, resultsContents: results, modelUri: newModelUri } as any // modelUri is not in the type, but we handle it below
 		);
+		input.setResultHash(this.resultHash);
+		return input;
 	}
 }
 

@@ -54,7 +54,7 @@ dist
 .v[0-9]*/
 # Local agent validation evidence
 .agent-validation/
-extensions/
+extensions/copilot
 core.*
 extensions/copilot/test/simulation/cache/layers/e051f92c-e4f0-4dd7-be6f-e4fdc77239a5.sqlite
 extensions/copilot/test/simulation/cache/layers/e38bfee4-7c23-4862-8479-43fef600a939.sqlite

@@ -280,7 +280,12 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 		}));
 		this._register(this.searchResultEditor.onDidChangeModelContent(() => {
 			if (!this.updatingModelForSearch) {
-				this.getInput()?.setDirty(true);
+				const input = this.getInput();
+				input?.setDirty(true);
+				const resultsModel = this.searchResultEditor.getModel();
+				if (input && resultsModel) {
+					void input.updateResultHash(resultsModel.getValue());
+				}
 			}
 		}));
 	}
@@ -630,11 +635,12 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 		const controller = ReferencesController.get(this.searchResultEditor);
 		controller?.closeWidget(false);
 		const labelFormatter = (uri: URI): string => this.labelService.getUriLabel(uri, { relative: true });
-		const results = serializeSearchResultForEditor(this.searchModel.searchResult, startConfig.filesToInclude, startConfig.filesToExclude, startConfig.contextLines, labelFormatter, sortOrder, searchOperation?.limitHit);
+		const results = await serializeSearchResultForEditor(this.searchModel.searchResult, startConfig.filesToInclude, startConfig.filesToExclude, startConfig.contextLines, labelFormatter, sortOrder, searchOperation?.limitHit);
 		const { resultsModel } = await input.resolveModels();
 		this.updatingModelForSearch = true;
 		this.modelService.updateModel(resultsModel, results.text);
 		this.updatingModelForSearch = false;
+		input.setResultHash(results.resultHash);
 
 		if (searchOperation && searchOperation.messages) {
 			for (const message of searchOperation.messages) {
