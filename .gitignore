@@ -55,6 +55,7 @@ dist
 # Local agent validation evidence
 .agent-validation/
 extensions/
+core.*
 extensions/copilot/test/simulation/cache/layers/e051f92c-e4f0-4dd7-be6f-e4fdc77239a5.sqlite
 extensions/copilot/test/simulation/cache/layers/e38bfee4-7c23-4862-8479-43fef600a939.sqlite
 extensions/copilot/test/simulation/cache/layers/e38bfee4-7c23-4862-8479-43fef600a939.sqlite
@@ -163,3 +164,4 @@ extensions/copilot/test/simulation/cache/layers/f6f886b2-0933-4a62-91e9-4840cee0
 extensions/copilot/test/simulation/cache/layers/f9bd58e9-8b91-477c-8aad-2222025f4607.sqlite
 extensions/copilot/test/simulation/cache/layers/f245cbe1-2962-48f7-9ce6-41a722693933.sqlite
 extensions/copilot/test/simulation/cache/layers/fa8a1ddb-9625-48c5-ae4f-1d083b1dcb0d.sqlite
+core.239684
