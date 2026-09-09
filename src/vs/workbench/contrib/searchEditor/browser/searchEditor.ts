@@ -132,6 +132,7 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 	private openResultsDiffAction!: Action;
 	private resultsDiffUpdate = 0;
 	private readonly resultsDiffInputs = new Map<MultiDiffEditorInput, SearchEditorDiffSession>();
+	private readonly openingResultsDiffInputs = new Set<SearchEditorInput>();
 	private confirmedUnappliedChanges: { input: SearchEditorInput; versionId: number } | undefined;
 
 	constructor(
@@ -293,6 +294,17 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 			this.searchEditorResultLogService.warn('Open diff skipped: Search Editor input or results model is unavailable');
 			return;
 		}
+		const existingDiffInput = [...this.resultsDiffInputs].find(([, session]) => session.searchEditorInput === input)?.[0];
+		if (existingDiffInput) {
+			this.searchEditorResultLogService.info('Revealing existing Search Editor result diff');
+			await this.editorService.openEditor(existingDiffInput, { pinned: true, revealIfOpened: true });
+			return;
+		}
+		if (this.openingResultsDiffInputs.has(input)) {
+			this.searchEditorResultLogService.info('Open diff skipped: Search Editor result diff is already opening');
+			return;
+		}
+		this.openingResultsDiffInputs.add(input);
 
 		let diffModels: SearchEditorDiffModels | undefined;
 		let diffInput: MultiDiffEditorInput | undefined;
@@ -370,6 +382,7 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 			diffInput?.dispose();
 			throw error;
 		} finally {
+			this.openingResultsDiffInputs.delete(input);
 			if (!diffInput) {
 				diffModels?.previewModels.dispose();
 				diffModels?.sourceReferences.dispose();
