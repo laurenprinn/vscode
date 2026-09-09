@@ -17,10 +17,13 @@ import { ITextFileService } from '../../../services/textfile/common/textfiles.js
 import { ISearchTreeMatch, ISearchTreeFileMatch, ISearchResult, ISearchTreeFolderMatch } from '../../search/browser/searchTreeModel/searchTreeCommon.js';
 import { searchMatchComparer } from '../../search/browser/searchCompare.js';
 import { ICellMatch, isNotebookFileMatch } from '../../search/browser/notebookSearch/notebookSearchModelBase.js';
+import type { SearchResultSource } from './searchEditorResultLines.js';
+
+export { applySearchResultLines, extractSearchResultSourceLabels, parseSearchResultLines } from './searchEditorResultLines.js';
+export type { SearchResultLine, SearchResultSource } from './searchEditorResultLines.js';
 
 // Using \r\n on Windows inserts an extra newline between results.
 const lineDelimiter = '\n';
-const searchResultFileLinePattern = /^(?<label>\S.*):$/;
 
 const translateRangeLines =
 	(n: number) =>
@@ -61,9 +64,6 @@ const matchToSearchResultFormat = (match: ISearchTreeMatch, longestLineNumber: n
 
 	return results;
 };
-
-export type SearchResultSource = { label: string; resource: URI };
-export type SearchResultLine = { resource: URI; sourceLineNumber: number; text: string };
 
 type SearchResultSerialization = { text: string[]; matchRanges: Range[]; sources: SearchResultSource[] };
 
@@ -294,62 +294,6 @@ const flattenSearchResultSerializations = (serializations: SearchResultSerializa
 
 	return { text, matchRanges, sources };
 };
-
-export function parseSearchResultLines(text: string, sources: readonly SearchResultSource[]): SearchResultLine[] {
-	const sourceByLabel = new Map(sources.map(source => [source.label, source.resource]));
-	const resultLinePattern = /^(?<indentation>\s+)(?<lineNumber>\d+)(?<separator>: |  )/;
-	const result: SearchResultLine[] = [];
-	let resource: URI | undefined;
-
-	for (const line of text.split(/\r?\n/)) {
-		const fileMatch = searchResultFileLinePattern.exec(line);
-		if (fileMatch?.groups) {
-			resource = sourceByLabel.get(fileMatch.groups.label);
-			continue;
-		}
-
-		const lineMatch = resultLinePattern.exec(line);
-		if (resource && lineMatch?.groups) {
-			const sourceLineNumber = Number(lineMatch.groups.lineNumber);
-			if (sourceLineNumber < 1) {
-				continue;
-			}
-			result.push({
-				resource,
-				sourceLineNumber,
-				text: line.slice(lineMatch[0].length)
-			});
-		}
-	}
-
-	return result;
-}
-
-export function extractSearchResultSourceLabels(text: string): string[] {
-	const labels = new Set<string>();
-	for (const line of text.split(/\r?\n/)) {
-		const fileMatch = searchResultFileLinePattern.exec(line);
-		if (fileMatch?.groups) {
-			labels.add(fileMatch.groups.label);
-		}
-	}
-	return [...labels];
-}
-
-export function applySearchResultLines(sourceLines: readonly string[], resultLines: readonly SearchResultLine[]): { lines: string[]; changed: boolean } {
-	const lines = [...sourceLines];
-	let changed = false;
-	for (const resultLine of resultLines) {
-		if (resultLine.sourceLineNumber < 1 || resultLine.sourceLineNumber > lines.length) {
-			continue;
-		}
-		if (lines[resultLine.sourceLineNumber - 1] !== resultLine.text) {
-			lines[resultLine.sourceLineNumber - 1] = resultLine.text;
-			changed = true;
-		}
-	}
-	return { lines, changed };
-}
 
 export const parseSavedSearchEditor = async (accessor: ServicesAccessor, resource: URI) => {
 	const textFileService = accessor.get(ITextFileService);

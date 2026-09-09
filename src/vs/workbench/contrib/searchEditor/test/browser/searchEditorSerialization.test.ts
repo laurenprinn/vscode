@@ -66,7 +66,7 @@ suite('SearchEditorSerialization', () => {
 			parsedQuery: parsed.config.query,
 			sourceLabels: extractSearchResultSourceLabels(parsed.text),
 			hashesDiffer: resultHash !== sourceHash,
-			parsedLines: parsedLines.map(line => ({ resource: line.resource.path, lineNumber: line.sourceLineNumber, text: line.text })),
+			parsedLines: parsedLines.map(line => ({ resource: line.resource.path, sourceLineNumber: line.sourceLineNumber, resultLineNumber: line.resultLineNumber, resultStartColumn: line.resultStartColumn, text: line.text })),
 			applied,
 		}, {
 			searchEditorResultHeader: ['1 result - 1 file', ''],
@@ -75,9 +75,9 @@ suite('SearchEditorSerialization', () => {
 			sourceLabels: ['/file.txt'],
 			hashesDiffer: true,
 			parsedLines: [
-				{ resource: '/file.txt', lineNumber: 1, text: 'before' },
-				{ resource: '/file.txt', lineNumber: 2, text: 'replacement' },
-				{ resource: '/file.txt', lineNumber: 3, text: 'after' },
+				{ resource: '/file.txt', sourceLineNumber: 1, resultLineNumber: 4, resultStartColumn: 6, text: 'before' },
+				{ resource: '/file.txt', sourceLineNumber: 2, resultLineNumber: 5, resultStartColumn: 6, text: 'replacement' },
+				{ resource: '/file.txt', sourceLineNumber: 3, resultLineNumber: 6, resultStartColumn: 6, text: 'after' },
 			],
 			applied: { lines: ['before', 'replacement', 'after', 'unchanged'], changed: true },
 		});
