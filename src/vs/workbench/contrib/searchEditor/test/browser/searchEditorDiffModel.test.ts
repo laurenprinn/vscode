@@ -115,4 +115,32 @@ suite('SearchEditorDiffModel', () => {
 		], () => null);
 		assert.deepStrictEqual(synchronizer.resources.value.map(resource => resource.goToFileUri?.path), ['/other.txt']);
 	});
+
+	test('synchronizes edits after an elided result offset', () => {
+		const source = URI.file('/file.txt');
+		const skippedText = 'x'.repeat(822);
+		const resultsModel = createTestTextModel('/file.txt:\n  1: ⟪ 822 characters skipped ⟫restOfLine\n  2: second');
+		const originalModel = createTestTextModel(`${skippedText}restOfLine\nsecond`);
+		const previewModel = createTestTextModel(`${skippedText}restOfLine\nsecond`);
+		const item = new MultiDiffEditorItem(source, URI.parse('search-editor-diff:/file.txt'), source);
+		const synchronizer = disposables.add(new SearchEditorDiffModelSynchronizer(
+			resultsModel,
+			() => [{ label: '/file.txt', resource: source }],
+			[{ resource: source, originalModel, modifiedModel: previewModel, item }],
+		));
+
+		assert.strictEqual(synchronizer.resources.value.length, 0);
+		previewModel.pushEditOperations(null, [{ range: new Range(2, 1, 2, 7), text: 'from diff' }], () => null);
+		resultsModel.pushEditOperations(null, [{ range: new Range(2, 6, 2, resultsModel.getLineMaxColumn(2)), text: '⟪ 822 characters skipped ⟫changed' }], () => null);
+
+		assert.deepStrictEqual({
+			results: resultsModel.getValue(),
+			preview: previewModel.getValue(),
+			changedResources: synchronizer.resources.value.map(resource => resource.goToFileUri?.path),
+		}, {
+			results: '/file.txt:\n  1: ⟪ 822 characters skipped ⟫changed\n  2: from diff',
+			preview: `${skippedText}changed\nfrom diff`,
+			changedResources: ['/file.txt'],
+		});
+	});
 });

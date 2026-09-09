@@ -82,4 +82,19 @@ suite('SearchEditorSerialization', () => {
 			applied: { lines: ['before', 'replacement', 'after', 'unchanged'], changed: true },
 		});
 	});
+
+	test('elided result lines preserve skipped source text', () => {
+		const sourceLine = `${'x'.repeat(822)}restOfLine`;
+		const sources = [{ label: '/file.txt', resource: URI.file('/file.txt') }];
+		const unchangedLine = parseSearchResultLines('/file.txt:\n  1: ⟪ 822 characters skipped ⟫restOfLine', sources);
+		const editedLine = parseSearchResultLines('/file.txt:\n  1: ⟪ 822 characters skipped ⟫changed', sources);
+
+		assert.deepStrictEqual({
+			unchanged: applySearchResultLines([sourceLine], unchangedLine),
+			edited: applySearchResultLines([sourceLine], editedLine),
+		}, {
+			unchanged: { lines: [sourceLine], changed: false },
+			edited: { lines: [`${'x'.repeat(822)}changed`], changed: true },
+		});
+	});
 });

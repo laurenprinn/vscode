@@ -13,7 +13,7 @@ import { IModelService } from '../../../../editor/common/services/model.js';
 import { ITextModelContentProvider, ITextModelService } from '../../../../editor/common/services/resolverService.js';
 import { IWorkbenchContribution } from '../../../common/contributions.js';
 import { MultiDiffEditorItem } from '../../multiDiffEditor/browser/multiDiffSourceResolverService.js';
-import { parseSearchResultLines, SearchResultSource } from './searchEditorResultLines.js';
+import { parseSearchResultLines, resolveSearchResultLineText, SearchResultSource } from './searchEditorResultLines.js';
 
 export const SearchEditorDiffScheme = 'search-editor-diff';
 
@@ -45,13 +45,18 @@ export class SearchEditorDiffModelSynchronizer extends Disposable {
 			const editsByModel = new Map<ITextModel, { range: Range; text: string }[]>();
 			for (const resultLine of parseSearchResultLines(this.resultsModel.getValue(), this.getResultSources())) {
 				const previewModel = this.diffModels.get(resultLine.resource)?.modifiedModel;
-				if (!previewModel || resultLine.sourceLineNumber > previewModel.getLineCount() || previewModel.getLineContent(resultLine.sourceLineNumber) === resultLine.text) {
+				if (!previewModel || resultLine.sourceLineNumber > previewModel.getLineCount()) {
+					continue;
+				}
+				const previewText = previewModel.getLineContent(resultLine.sourceLineNumber);
+				const resultText = resolveSearchResultLineText(previewText, resultLine.text);
+				if (previewText === resultText) {
 					continue;
 				}
 				const edits = editsByModel.get(previewModel) ?? [];
 				edits.push({
 					range: new Range(resultLine.sourceLineNumber, 1, resultLine.sourceLineNumber, previewModel.getLineMaxColumn(resultLine.sourceLineNumber)),
-					text: resultLine.text,
+					text: resultText,
 				});
 				editsByModel.set(previewModel, edits);
 			}
@@ -66,11 +71,13 @@ export class SearchEditorDiffModelSynchronizer extends Disposable {
 		this.runSynchronizedUpdate(() => {
 			const edits: { range: Range; text: string }[] = [];
 			for (const resultLine of parseSearchResultLines(this.resultsModel.getValue(), this.getResultSources())) {
-				if (this.diffModels.get(resultLine.resource)?.modifiedModel !== previewModel || resultLine.sourceLineNumber > previewModel.getLineCount()) {
+				const diffModel = this.diffModels.get(resultLine.resource);
+				if (diffModel?.modifiedModel !== previewModel || resultLine.sourceLineNumber > previewModel.getLineCount() || resultLine.sourceLineNumber > diffModel.originalModel.getLineCount()) {
 					continue;
 				}
 				const text = previewModel.getLineContent(resultLine.sourceLineNumber);
-				if (text !== resultLine.text) {
+				const originalText = diffModel.originalModel.getLineContent(resultLine.sourceLineNumber);
+				if (text !== resolveSearchResultLineText(originalText, resultLine.text)) {
 					edits.push({
 						range: new Range(resultLine.resultLineNumber, resultLine.resultStartColumn, resultLine.resultLineNumber, this.resultsModel.getLineMaxColumn(resultLine.resultLineNumber)),
 						text,

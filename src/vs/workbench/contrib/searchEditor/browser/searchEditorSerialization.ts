@@ -19,7 +19,7 @@ import { searchMatchComparer } from '../../search/browser/searchCompare.js';
 import { ICellMatch, isNotebookFileMatch } from '../../search/browser/notebookSearch/notebookSearchModelBase.js';
 import type { SearchResultSource } from './searchEditorResultLines.js';
 
-export { applySearchResultLines, extractSearchResultSourceLabels, parseSearchResultLines } from './searchEditorResultLines.js';
+export { applySearchResultLines, extractSearchResultSourceLabels, parseSearchResultLines, resolveSearchResultLineText } from './searchEditorResultLines.js';
 export type { SearchResultLine, SearchResultSource } from './searchEditorResultLines.js';
 
 // Using \r\n on Windows inserts an extra newline between results.

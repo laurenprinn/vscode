@@ -54,7 +54,7 @@ import { getOutOfWorkspaceEditorResources } from '../../search/common/search.js'
 import { SearchModelImpl } from '../../search/browser/searchTreeModel/searchModel.js';
 import { InSearchEditor, OpenSearchEditorResultsDiffCommandId, SearchEditorID, SearchEditorInputTypeId, SearchConfiguration } from './constants.js';
 import type { SearchEditorInput } from './searchEditorInput.js';
-import { applySearchResultLines, computeSearchResultHash, extractSearchResultSourceLabels, parseSearchResultLines, SearchResultLine, SearchResultSource, serializeSearchResultForEditor } from './searchEditorSerialization.js';
+import { applySearchResultLines, computeSearchResultHash, extractSearchResultSourceLabels, parseSearchResultLines, resolveSearchResultLineText, SearchResultLine, SearchResultSource, serializeSearchResultForEditor } from './searchEditorSerialization.js';
 import { GroupDirection, IEditorGroup, IEditorGroupsService } from '../../../services/editor/common/editorGroupsService.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { IPatternInfo, ISearchComplete, ISearchConfigurationProperties, ITextQuery, SearchSortOrder } from '../../../services/search/common/search.js';
@@ -296,7 +296,7 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 					}
 					const sourceText = sourceModel.getLineContent(line.sourceLineNumber);
 					const hashKey = `${resource.toString()}\0${line.sourceLineNumber}\0`;
-					resultHashText.push(hashKey + line.text);
+					resultHashText.push(hashKey + resolveSearchResultLineText(sourceText, line.text));
 					sourceHashText.push(hashKey + sourceText);
 				}
 
@@ -396,7 +396,8 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 						if (line.sourceLineNumber > sourceModel.getLineCount()) {
 							continue;
 						}
-						if (line.text !== sourceModel.getLineContent(line.sourceLineNumber)) {
+						const sourceText = sourceModel.getLineContent(line.sourceLineNumber);
+						if (resolveSearchResultLineText(sourceText, line.text) !== sourceText) {
 							hasChanges = true;
 						}
 					}
