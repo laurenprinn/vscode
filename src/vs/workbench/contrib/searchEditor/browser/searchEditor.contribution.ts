@@ -3,19 +3,26 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { Codicon } from '../../../../base/common/codicons.js';
 import { KeyCode, KeyMod } from '../../../../base/common/keyCodes.js';
+import { Disposable } from '../../../../base/common/lifecycle.js';
 import { extname, isEqual } from '../../../../base/common/resources.js';
 import { URI } from '../../../../base/common/uri.js';
 import { ServicesAccessor } from '../../../../editor/browser/editorExtensions.js';
+import { IBulkEditService, ResourceTextEdit } from '../../../../editor/browser/services/bulkEditService.js';
 import { Range } from '../../../../editor/common/core/range.js';
+import { ITextModelService } from '../../../../editor/common/services/resolverService.js';
 import { ToggleCaseSensitiveKeybinding, ToggleRegexKeybinding, ToggleWholeWordKeybinding } from '../../../../editor/contrib/find/browser/findModel.js';
+import { EditorContextKeys } from '../../../../editor/common/editorContextKeys.js';
 import { localize, localize2 } from '../../../../nls.js';
 import { Action2, MenuId, registerAction2 } from '../../../../platform/actions/common/actions.js';
 import { CommandsRegistry } from '../../../../platform/commands/common/commands.js';
 import { ContextKeyExpr, IContextKeyService } from '../../../../platform/contextkey/common/contextkey.js';
 import { SyncDescriptor } from '../../../../platform/instantiation/common/descriptors.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
+import { InstantiationType, registerSingleton } from '../../../../platform/instantiation/common/extensions.js';
 import { KeybindingWeight } from '../../../../platform/keybinding/common/keybindingsRegistry.js';
+import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { Registry } from '../../../../platform/registry/common/platform.js';
 import { EditorPaneDescriptor, IEditorPaneRegistry } from '../../../browser/editor.js';
 import { IWorkbenchContribution, WorkbenchPhase, registerWorkbenchContribution2 } from '../../../common/contributions.js';
@@ -32,15 +39,17 @@ import { getOrMakeSearchEditorInput, SearchEditorInput, SEARCH_EDITOR_EXT } from
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { VIEW_ID } from '../../../services/search/common/search.js';
 import { searchConfigurationNode } from '../../search/common/search.js';
+import { ITextFileService } from '../../../services/textfile/common/textfiles.js';
 import { RegisteredEditorPriority, IEditorResolverService } from '../../../services/editor/common/editorResolverService.js';
 import { IWorkingCopyEditorHandler, IWorkingCopyEditorService } from '../../../services/workingCopy/common/workingCopyEditorService.js';
-import { Disposable } from '../../../../base/common/lifecycle.js';
 import { IWorkingCopyIdentifier } from '../../../services/workingCopy/common/workingCopy.js';
 import { EditorInput } from '../../../common/editor/editorInput.js';
 import { getActiveElement } from '../../../../base/browser/dom.js';
 import * as nls from '../../../../nls.js';
 import { Extensions as ConfigurationExtensions, IConfigurationRegistry } from '../../../../platform/configuration/common/configurationRegistry.js';
+import { ISearchEditorResultLogService, SearchEditorResultLogService } from './searchEditorResultLogService.js';
 
+registerSingleton(ISearchEditorResultLogService, SearchEditorResultLogService, InstantiationType.Delayed);
 
 const OpenInEditorCommandId = 'search.action.openInEditor';
 const OpenNewEditorToSideCommandId = 'search.action.openNewEditorToSide';
@@ -57,6 +66,92 @@ const DecreaseSearchEditorContextLinesCommandId = 'decreaseSearchEditorContextLi
 const RerunSearchEditorSearchCommandId = 'rerunSearchEditorSearch';
 const CleanSearchEditorStateCommandId = 'cleanSearchEditorState';
 const SelectAllSearchEditorMatchesCommandId = 'selectAllSearchEditorMatches';
+
+const inSearchEditorInlineDiff = ContextKeyExpr.and(
+	SearchEditorConstants.InSearchEditor,
+	SearchEditorConstants.SearchEditorInlineDiffVisible,
+);
+
+function updateVisibleSearchEditors(editorService: IEditorService): void {
+	for (const pane of editorService.visibleEditorPanes) {
+		if (pane instanceof SearchEditor) {
+			pane.updateResultsDiffAction();
+		}
+	}
+}
+
+async function applySearchEditorDiffText(accessor: ServicesAccessor, resource: URI, text: string, label: string): Promise<boolean> {
+	const textModelService = accessor.get(ITextModelService);
+	const bulkEditService = accessor.get(IBulkEditService);
+	const editorService = accessor.get(IEditorService);
+	const textFileService = accessor.get(ITextFileService);
+	const notificationService = accessor.get(INotificationService);
+	const logService = accessor.get(ISearchEditorResultLogService);
+	const reference = await textModelService.createModelReference(resource);
+	try {
+		const model = reference.object.textEditorModel;
+		if (model.getValue() === text) {
+			logService.info(`Apply skipped: Search Editor result matches source file (${resource.toString()})`);
+			return true;
+		}
+		logService.info(`Applying Search Editor result change (${resource.toString()})`);
+		const result = await bulkEditService.apply([
+			new ResourceTextEdit(resource, { range: model.getFullModelRange(), text }, model.getVersionId()),
+		], {
+			label,
+			code: 'undoredo.searchEditor.applyChange',
+		});
+		if (result.isApplied) {
+			await textFileService.save(resource);
+			logService.info(`Applied Search Editor result change (${resource.toString()})`);
+			notificationService.info(localize('searchEditor.resultChangesAppliedSingle', "Changes applied to 1 file."));
+			updateVisibleSearchEditors(editorService);
+			return true;
+		} else {
+			logService.warn(`Search Editor result change was not applied (${resource.toString()})`);
+			return false;
+		}
+	} catch (error) {
+		logService.error(`Failed to apply Search Editor result change (${resource.toString()})`, error);
+		throw error;
+	} finally {
+		reference.dispose();
+	}
+}
+
+async function applyAllSearchEditorResultChanges(
+	changes: readonly { resource: URI; range: Range; text: string; versionId: number }[],
+	label: string,
+	bulkEditService: IBulkEditService,
+	editorService: IEditorService,
+	textFileService: ITextFileService,
+	notificationService: INotificationService,
+	logService: ISearchEditorResultLogService,
+): Promise<boolean> {
+	if (changes.length === 0) {
+		logService.info('Apply all skipped: Search Editor results match source files');
+		return true;
+	}
+
+	logService.info(`Applying all Search Editor result changes (files=${changes.length})`);
+	const result = await bulkEditService.apply(changes.map(change => new ResourceTextEdit(
+		change.resource,
+		{ range: change.range, text: change.text },
+		change.versionId,
+	)), {
+		label,
+		code: 'undoredo.searchEditor.applyChanges',
+	});
+	if (result.isApplied) {
+		await Promise.all(changes.map(change => textFileService.save(change.resource)));
+		notificationService.info(changes.length === 1
+			? localize('searchEditor.resultChangesAppliedSingle', "Changes applied to 1 file.")
+			: localize('searchEditor.resultChangesAppliedMultiple', "Changes applied to {0} files.", changes.length));
+		updateVisibleSearchEditors(editorService);
+		return true;
+	}
+	return false;
+}
 
 
 //#region Search Editor Configuration
@@ -304,6 +399,28 @@ registerAction2(class extends Action2 {
 registerAction2(class extends Action2 {
 	constructor() {
 		super({
+			id: SearchEditorConstants.BackspaceSearchEditorSourceLineCommandId,
+			title: localize2('searchEditor.backspaceSourceLine', 'Backspace Search Result Line'),
+			precondition: SearchEditorConstants.InSearchEditor,
+			keybinding: {
+				weight: KeybindingWeight.EditorContrib,
+				primary: KeyCode.Backspace,
+				when: ContextKeyExpr.and(SearchEditorConstants.InSearchEditor, EditorContextKeys.editorTextFocus),
+			},
+		});
+	}
+
+	run(accessor: ServicesAccessor): void {
+		const editorPane = accessor.get(IEditorService).activeEditorPane;
+		if (editorPane instanceof SearchEditor) {
+			editorPane.backspaceSourceLine();
+		}
+	}
+});
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
 			id: SearchEditorConstants.OpenNewEditorCommandId,
 			title: localize2('search.openNewSearchEditor', 'New Search Editor'),
 			category,
@@ -313,6 +430,94 @@ registerAction2(class extends Action2 {
 	}
 	async run(accessor: ServicesAccessor, args: LegacySearchEditorArgs | OpenSearchEditorArgs) {
 		await accessor.get(IInstantiationService).invokeFunction(openNewSearchEditor, translateLegacyConfig({ location: 'new', ...args }));
+	}
+});
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: SearchEditorConstants.InsertSearchEditorSourceLineAboveCommandId,
+			title: localize2('searchEditor.insertSourceLineAbove', 'Insert Source Line Above'),
+			category,
+			f1: true,
+			precondition: SearchEditorConstants.InSearchEditor,
+			menu: { id: MenuId.EditorContext, when: SearchEditorConstants.InSearchEditor, group: '1_modification' },
+		});
+	}
+
+	run(accessor: ServicesAccessor): void {
+		const editorPane = accessor.get(IEditorService).activeEditorPane;
+		if (editorPane instanceof SearchEditor) {
+			editorPane.insertSourceLine(true);
+		}
+	}
+});
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: SearchEditorConstants.InsertSearchEditorSourceLineBelowCommandId,
+			title: localize2('searchEditor.insertSourceLineBelow', 'Insert Source Line Below'),
+			category,
+			f1: true,
+			precondition: SearchEditorConstants.InSearchEditor,
+			menu: { id: MenuId.EditorContext, when: SearchEditorConstants.InSearchEditor, group: '1_modification' },
+		});
+	}
+
+	run(accessor: ServicesAccessor): void {
+		const editorPane = accessor.get(IEditorService).activeEditorPane;
+		if (editorPane instanceof SearchEditor) {
+			editorPane.insertSourceLine(false);
+		}
+	}
+});
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: SearchEditorConstants.EnterSearchEditorSourceLineCommandId,
+			title: localize2('searchEditor.enterSourceLine', 'Insert Search Result Line Break'),
+			precondition: SearchEditorConstants.InSearchEditor,
+			keybinding: {
+				weight: KeybindingWeight.EditorContrib,
+				primary: KeyCode.Enter,
+				when: ContextKeyExpr.and(SearchEditorConstants.InSearchEditor, EditorContextKeys.editorTextFocus),
+			},
+		});
+	}
+
+	run(accessor: ServicesAccessor): void {
+		const editorPane = accessor.get(IEditorService).activeEditorPane;
+		if (editorPane instanceof SearchEditor) {
+			editorPane.enterSourceLine();
+		}
+	}
+});
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: SearchEditorConstants.DeleteSearchEditorSourceLineCommandId,
+			title: localize2('searchEditor.deleteSourceLine', 'Delete Source Line'),
+			category,
+			f1: true,
+			precondition: SearchEditorConstants.InSearchEditor,
+			keybinding: {
+				weight: KeybindingWeight.EditorContrib,
+				primary: KeyCode.Delete,
+				secondary: [KeyMod.CtrlCmd | KeyMod.Shift | KeyCode.KeyK],
+				when: ContextKeyExpr.and(SearchEditorConstants.InSearchEditor, EditorContextKeys.editorTextFocus),
+			},
+			menu: { id: MenuId.EditorContext, when: SearchEditorConstants.InSearchEditor, group: '1_modification' },
+		});
+	}
+
+	run(accessor: ServicesAccessor): void {
+		const editorPane = accessor.get(IEditorService).activeEditorPane;
+		if (editorPane instanceof SearchEditor) {
+			editorPane.deleteSourceLine();
+		}
 	}
 });
 
@@ -401,6 +606,163 @@ registerAction2(class extends Action2 {
 		const input = editorService.activeEditor;
 		if (input instanceof SearchEditorInput) {
 			(editorService.activeEditorPane as SearchEditor).triggerSearch({ resetCursor: false });
+		}
+	}
+});
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: SearchEditorConstants.OpenSearchEditorResultsInlineDiffCommandId,
+			title: localize2('searchEditor.openResultsInlineDiff', 'View Inline Changes'),
+			category,
+			f1: true,
+			precondition: SearchEditorConstants.InSearchEditor,
+			keybinding: {
+				primary: KeyMod.CtrlCmd | KeyCode.KeyD,
+				mac: { primary: KeyMod.WinCtrl | KeyCode.KeyD },
+				when: SearchEditorConstants.InSearchEditor,
+				weight: KeybindingWeight.EditorContrib,
+			},
+		});
+	}
+
+	run(accessor: ServicesAccessor): Promise<void> | undefined {
+		const editorService = accessor.get(IEditorService);
+		if (editorService.activeEditor instanceof SearchEditorInput) {
+			return (editorService.activeEditorPane as SearchEditor).toggleResultsInlineDiff();
+		}
+		return undefined;
+	}
+});
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: SearchEditorConstants.ApplySearchEditorInlineResultChangeCommandId,
+			title: localize2('searchEditor.applyInlineResultChange', 'Apply Search Result to Source File'),
+			category,
+			f1: true,
+			precondition: inSearchEditorInlineDiff,
+			menu: {
+				id: MenuId.EditorContext,
+				when: inSearchEditorInlineDiff,
+				group: '1_modification',
+			},
+		});
+	}
+
+	async run(accessor: ServicesAccessor, lineNumber?: number): Promise<void> {
+		const editorService = accessor.get(IEditorService);
+		const editorPane = editorService.activeEditorPane;
+		if (!(editorPane instanceof SearchEditor)) {
+			return;
+		}
+		const change = editorPane.getInlineResultChange(lineNumber);
+		if (!change) {
+			return;
+		}
+		const applied = await applySearchEditorDiffText(
+			accessor,
+			change.resource,
+			change.text,
+			localize('searchEditor.applyInlineResultChange.label', "Apply Search Result Change"),
+		);
+		if (applied) {
+			await editorPane.rebaseAppliedResultChanges([change.resource]);
+		}
+	}
+});
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: SearchEditorConstants.PreviousSearchEditorInlineResultChangeCommandId,
+			title: localize2('searchEditor.previousInlineResultChange', 'Previous Inline Change'),
+			icon: Codicon.arrowUp,
+			category,
+			f1: true,
+			precondition: inSearchEditorInlineDiff,
+			keybinding: {
+				primary: KeyMod.Shift | KeyCode.F7,
+				when: inSearchEditorInlineDiff,
+				weight: KeybindingWeight.EditorContrib,
+			},
+		});
+	}
+
+	run(accessor: ServicesAccessor): void {
+		const editorPane = accessor.get(IEditorService).activeEditorPane;
+		if (editorPane instanceof SearchEditor) {
+			editorPane.goToPreviousInlineResultChange();
+		}
+	}
+});
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: SearchEditorConstants.NextSearchEditorInlineResultChangeCommandId,
+			title: localize2('searchEditor.nextInlineResultChange', 'Next Inline Change'),
+			icon: Codicon.arrowDown,
+			category,
+			f1: true,
+			precondition: inSearchEditorInlineDiff,
+			keybinding: {
+				primary: KeyCode.F7,
+				when: inSearchEditorInlineDiff,
+				weight: KeybindingWeight.EditorContrib,
+			},
+		});
+	}
+
+	run(accessor: ServicesAccessor): void {
+		const editorPane = accessor.get(IEditorService).activeEditorPane;
+		if (editorPane instanceof SearchEditor) {
+			editorPane.goToNextInlineResultChange();
+		}
+	}
+});
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: SearchEditorConstants.ApplyAllSearchEditorResultChangesCommandId,
+			title: localize2('searchEditor.applyAllResultChanges', 'Apply All Changes'),
+			icon: Codicon.checkAll,
+			category,
+			f1: true,
+			precondition: SearchEditorConstants.InSearchEditor,
+			keybinding: {
+				primary: KeyMod.CtrlCmd | KeyMod.Alt | KeyCode.KeyS,
+				mac: { primary: KeyMod.WinCtrl | KeyMod.Alt | KeyCode.KeyS },
+				when: SearchEditorConstants.InSearchEditor,
+				weight: KeybindingWeight.EditorContrib,
+			},
+		});
+	}
+
+	async run(accessor: ServicesAccessor): Promise<void> {
+		const bulkEditService = accessor.get(IBulkEditService);
+		const editorService = accessor.get(IEditorService);
+		const textFileService = accessor.get(ITextFileService);
+		const notificationService = accessor.get(INotificationService);
+		const logService = accessor.get(ISearchEditorResultLogService);
+		const editorPane = editorService.activeEditorPane;
+		if (editorPane instanceof SearchEditor) {
+			const changes = await editorPane.getAllResultChanges();
+			const applied = await applyAllSearchEditorResultChanges(
+				changes,
+				localize('searchEditor.applyAllResultChanges.label', "Apply All Search Result Changes"),
+				bulkEditService,
+				editorService,
+				textFileService,
+				notificationService,
+				logService,
+			);
+			if (applied) {
+				await editorPane.rebaseAppliedResultChanges(changes.map(change => change.resource));
+			}
 		}
 	}
 });

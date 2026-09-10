@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { coalesce } from '../../../../base/common/arrays.js';
+import { encodeHex, VSBuffer } from '../../../../base/common/buffer.js';
 import { URI } from '../../../../base/common/uri.js';
 import './media/searchEditor.css';
 import { ServicesAccessor } from '../../../../editor/browser/editorExtensions.js';
@@ -16,6 +17,10 @@ import { ITextFileService } from '../../../services/textfile/common/textfiles.js
 import { ISearchTreeMatch, ISearchTreeFileMatch, ISearchResult, ISearchTreeFolderMatch } from '../../search/browser/searchTreeModel/searchTreeCommon.js';
 import { searchMatchComparer } from '../../search/browser/searchCompare.js';
 import { ICellMatch, isNotebookFileMatch } from '../../search/browser/notebookSearch/notebookSearchModelBase.js';
+import type { SearchResultSource } from './searchEditorResultLines.js';
+
+export { applySearchResultLines, extractSearchResultSourceLabels, getSearchResultInsertAnchorLineNumber, mergeSearchResultLines, mergeSearchResultLineText, parseSearchResultLines, rebaseSearchResultLines, resolveSearchResultLineText } from './searchEditorResultLines.js';
+export type { SearchResultLine, SearchResultSource } from './searchEditorResultLines.js';
 
 // Using \r\n on Windows inserts an extra newline between results.
 const lineDelimiter = '\n';
@@ -60,7 +65,7 @@ const matchToSearchResultFormat = (match: ISearchTreeMatch, longestLineNumber: n
 	return results;
 };
 
-type SearchResultSerialization = { text: string[]; matchRanges: Range[] };
+type SearchResultSerialization = { text: string[]; matchRanges: Range[]; sources: SearchResultSource[] };
 
 function fileMatchToSearchResultFormat(fileMatch: ISearchTreeFileMatch, labelFormatter: (x: URI) => string): SearchResultSerialization[] {
 
@@ -72,7 +77,8 @@ function fileMatchToSearchResultFormat(fileMatch: ISearchTreeFileMatch, labelFor
 function matchesToSearchResultFormat(resource: URI, sortedMatches: ISearchTreeMatch[], matchContext: Map<number, string>, labelFormatter: (x: URI) => string, shouldUseHeader = true): SearchResultSerialization {
 	const longestLineNumber = sortedMatches[sortedMatches.length - 1].range().endLineNumber.toString().length;
 
-	const text: string[] = shouldUseHeader ? [`${labelFormatter(resource)}:`] : [];
+	const label = labelFormatter(resource);
+	const text: string[] = shouldUseHeader ? [`${label}:`] : [];
 	const matchRanges: Range[] = [];
 
 	const targetLineNumberToOffset: Record<string, number> = {};
@@ -111,7 +117,7 @@ function matchesToSearchResultFormat(resource: URI, sortedMatches: ISearchTreeMa
 		text.push(`  ${lineNumber}  ${line}`);
 	}
 
-	return { text, matchRanges };
+	return { text, matchRanges, sources: shouldUseHeader ? [{ label, resource }] : [] };
 }
 
 function cellMatchToSearchResultFormat(cellMatch: ICellMatch, labelFormatter: (x: URI) => string, shouldUseHeader: boolean): SearchResultSerialization {
@@ -159,6 +165,11 @@ export const serializeSearchConfiguration = (config: Partial<SearchConfiguration
 		config.contextLines ? `# ContextLines: ${config.contextLines}` : undefined,
 		''
 	]).join(lineDelimiter);
+};
+
+export const computeSearchResultHash = async (text: string): Promise<string> => {
+	const resultHashBuffer = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+	return encodeHex(VSBuffer.wrap(new Uint8Array(resultHashBuffer)));
 };
 
 export const extractSearchQueryFromModel = (model: ITextModel): SearchConfiguration =>
@@ -236,13 +247,20 @@ export const extractSearchQueryFromLines = (lines: string[]): SearchConfiguratio
 };
 
 export const serializeSearchResultForEditor =
-	(searchResult: ISearchResult, rawIncludePattern: string, rawExcludePattern: string, contextLines: number, labelFormatter: (x: URI) => string, sortOrder: SearchSortOrder, limitHit?: boolean): { matchRanges: Range[]; text: string; config: Partial<SearchConfiguration> } => {
+	async (searchResult: ISearchResult, rawIncludePattern: string, rawExcludePattern: string, contextLines: number, labelFormatter: (x: URI) => string, sortOrder: SearchSortOrder, limitHit?: boolean): Promise<{ matchRanges: Range[]; text: string; config: Partial<SearchConfiguration>; sources: SearchResultSource[] }> => {
 		if (!searchResult.query) { throw Error('Internal Error: Expected query, got null'); }
 		const config = contentPatternToSearchConfiguration(searchResult.query, rawIncludePattern, rawExcludePattern, contextLines);
 
 		const filecount = searchResult.fileCount() > 1 ? localize('numFiles', "{0} files", searchResult.fileCount()) : localize('oneFile', "1 file");
 		const resultcount = searchResult.count() > 1 ? localize('numResults', "{0} results", searchResult.count()) : localize('oneResult', "1 result");
 
+		const matchComparer = (a: ISearchTreeFileMatch | ISearchTreeFolderMatch, b: ISearchTreeFileMatch | ISearchTreeFolderMatch) => searchMatchComparer(a, b, sortOrder);
+
+		const allResults =
+			flattenSearchResultSerializations(
+				searchResult.folderMatches().sort(matchComparer)
+					.map(folderMatch => folderMatch.allDownstreamFileMatches().sort(matchComparer)
+						.flatMap(fileMatch => fileMatchToSearchResultFormat(fileMatch, labelFormatter))).flat());
 		const info = [
 			searchResult.count()
 				? `${resultcount} - ${filecount}`
@@ -252,33 +270,29 @@ export const serializeSearchResultForEditor =
 			info.push(localize('searchMaxResultsWarning', "The result set only contains a subset of all matches. Be more specific in your search to narrow down the results."));
 		}
 		info.push('');
-
-		const matchComparer = (a: ISearchTreeFileMatch | ISearchTreeFolderMatch, b: ISearchTreeFileMatch | ISearchTreeFolderMatch) => searchMatchComparer(a, b, sortOrder);
-
-		const allResults =
-			flattenSearchResultSerializations(
-				searchResult.folderMatches().sort(matchComparer)
-					.map(folderMatch => folderMatch.allDownstreamFileMatches().sort(matchComparer)
-						.flatMap(fileMatch => fileMatchToSearchResultFormat(fileMatch, labelFormatter))).flat());
+		const text = info.concat(allResults.text).join(lineDelimiter);
 
 		return {
 			matchRanges: allResults.matchRanges.map(translateRangeLines(info.length)),
-			text: info.concat(allResults.text).join(lineDelimiter),
-			config
+			text,
+			config,
+			sources: allResults.sources
 		};
 	};
 
 const flattenSearchResultSerializations = (serializations: SearchResultSerialization[]): SearchResultSerialization => {
 	const text: string[] = [];
 	const matchRanges: Range[] = [];
+	const sources: SearchResultSource[] = [];
 
 	serializations.forEach(serialized => {
 		serialized.matchRanges.map(translateRangeLines(text.length)).forEach(range => matchRanges.push(range));
 		serialized.text.forEach(line => text.push(line));
+		sources.push(...serialized.sources);
 		text.push(''); // new line
 	});
 
-	return { text, matchRanges };
+	return { text, matchRanges, sources };
 };
 
 export const parseSavedSearchEditor = async (accessor: ServicesAccessor, resource: URI) => {

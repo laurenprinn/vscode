@@ -12,7 +12,7 @@ import { IFindInputOptions } from '../../../../base/browser/ui/findinput/findInp
 import { ReplaceInput } from '../../../../base/browser/ui/findinput/replaceInput.js';
 import { IInputBoxStyles, IMessage, InputBox } from '../../../../base/browser/ui/inputbox/inputBox.js';
 import { Widget } from '../../../../base/browser/ui/widget.js';
-import { Action } from '../../../../base/common/actions.js';
+import { Action, IAction } from '../../../../base/common/actions.js';
 import { Delayer, disposableTimeout } from '../../../../base/common/async.js';
 import { Emitter, Event } from '../../../../base/common/event.js';
 import { KeyCode, KeyMod } from '../../../../base/common/keyCodes.js';
@@ -60,6 +60,7 @@ export interface ISearchWidgetOptions {
 	preserveCase?: boolean;
 	_hideReplaceToggle?: boolean; // TODO: Search Editor's replace experience
 	showContextToggle?: boolean;
+	additionalSearchInputActions?: readonly IAction[];
 	inputBoxStyles: IInputBoxStyles;
 	toggleStyles: IToggleStyles;
 	notebookOptions?: NotebookToggleState;
@@ -527,6 +528,12 @@ export class SearchWidget extends Widget {
 				this.onContextLinesChanged();
 			}));
 			dom.append(searchInputContainer, this.showContextToggle.domNode);
+		}
+
+		if (options.additionalSearchInputActions) {
+			const actionBar = this._register(new ActionBar(searchInputContainer));
+			actionBar.domNode.classList.add('search-widget-additional-action');
+			actionBar.push(options.additionalSearchInputActions, { icon: true, label: false });
 		}
 	}
 

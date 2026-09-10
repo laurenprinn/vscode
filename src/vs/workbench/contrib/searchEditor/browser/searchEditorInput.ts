@@ -20,7 +20,7 @@ import { GroupIdentifier, IRevertOptions, ISaveOptions, EditorResourceAccessor, 
 import { Memento } from '../../../common/memento.js';
 import { SearchEditorFindMatchClass, SearchEditorInputTypeId, SearchEditorScheme, SearchEditorWorkingCopyTypeId, SearchConfiguration } from './constants.js';
 import { SearchConfigurationModel, SearchEditorModel, searchEditorModelFactory } from './searchEditorModel.js';
-import { defaultSearchConfig, parseSavedSearchEditor, serializeSearchConfiguration } from './searchEditorSerialization.js';
+import { defaultSearchConfig, parseSavedSearchEditor, SearchResultSource, serializeSearchConfiguration } from './searchEditorSerialization.js';
 import { IPathService } from '../../../services/path/common/pathService.js';
 import { ITextFileSaveOptions, ITextFileService } from '../../../services/textfile/common/textfiles.js';
 import { IWorkingCopyService } from '../../../services/workingCopy/common/workingCopyService.js';
@@ -67,6 +67,7 @@ export class SearchEditorInput extends EditorInput {
 	private memento: Memento<{ searchConfig: SearchConfiguration }>;
 
 	private dirty: boolean = false;
+	private unappliedChangesCount = 0;
 
 	private lastLabel: string | undefined;
 
@@ -77,6 +78,7 @@ export class SearchEditorInput extends EditorInput {
 	readonly onDidSave: Event<IWorkingCopySaveEvent> = this._onDidSave.event;
 
 	private oldDecorationsIDs: string[] = [];
+	private resultSources: readonly SearchResultSource[] = [];
 
 	get resource() {
 		return this.backingUri || this.modelUri;
@@ -196,6 +198,7 @@ export class SearchEditorInput extends EditorInput {
 				if (!isEqual(path, this.modelUri)) {
 					const input = this.instantiationService.invokeFunction(getOrMakeSearchEditorInput, { fileUri: path, from: 'existingFile' });
 					input.setMatchRanges(this.getMatchRanges());
+					input.setResultSources(this.resultSources);
 					return input;
 				}
 				return this;
@@ -206,17 +209,36 @@ export class SearchEditorInput extends EditorInput {
 
 	override getName(maxLength = 12): string {
 		const trimToMax = (label: string) => (label.length < maxLength ? label : `${label.slice(0, maxLength - 3)}...`);
+		let name: string;
 
 		if (this.backingUri) {
 			const originalURI = EditorResourceAccessor.getOriginalUri(this);
-			return localize('searchTitle.withQuery', "Search: {0}", basename((originalURI ?? this.backingUri).path, SEARCH_EDITOR_EXT));
+			name = localize('searchTitle.withQuery', "Search: {0}", basename((originalURI ?? this.backingUri).path, SEARCH_EDITOR_EXT));
+		} else {
+			const query = this._cachedConfigurationModel?.config?.query?.trim();
+			name = query
+				? localize('searchTitle.withQuery', "Search: {0}", trimToMax(query))
+				: localize('searchTitle', "Search");
 		}
 
-		const query = this._cachedConfigurationModel?.config?.query?.trim();
-		if (query) {
-			return localize('searchTitle.withQuery', "Search: {0}", trimToMax(query));
+		if (this.unappliedChangesCount === 1) {
+			return localize('searchEditor.unappliedChangeTitle', "{0} - 1 file with unapplied changes", name);
 		}
-		return localize('searchTitle', "Search");
+		if (this.unappliedChangesCount > 1) {
+			return localize('searchEditor.unappliedChangesTitle', "{0} - {1} files with unapplied changes", name, this.unappliedChangesCount);
+		}
+		return name;
+	}
+
+	setUnappliedChangesCount(count: number): void {
+		if (this.unappliedChangesCount !== count) {
+			this.unappliedChangesCount = count;
+			this._onDidChangeLabel.fire();
+		}
+	}
+
+	getUnappliedChangesCount(): number {
+		return this.unappliedChangesCount;
 	}
 
 	setDirty(dirty: boolean) {
@@ -225,6 +247,30 @@ export class SearchEditorInput extends EditorInput {
 		if (wasDirty !== dirty) {
 			this._onDidChangeDirty.fire();
 		}
+	}
+
+	setResultSources(sources: readonly SearchResultSource[]): void {
+		this.resultSources = sources;
+	}
+
+	getResultSources(): readonly SearchResultSource[] {
+		return this.resultSources;
+	}
+
+	setResultBaseline(entries: readonly { resource: URI; lines: readonly string[] }[]): void {
+		this.model.setResultBaseline(entries);
+	}
+
+	hasResultBaseline(): boolean {
+		return this.model.hasResultBaseline();
+	}
+
+	getResultBaseline(resource: URI): readonly string[] | undefined {
+		return this.model.getResultBaseline(resource);
+	}
+
+	getResultBaselineEntries(): { resource: URI; lines: readonly string[] }[] {
+		return this.model.getResultBaselineEntries();
 	}
 
 	override isDirty() {
@@ -323,11 +369,16 @@ export class SearchEditorInput extends EditorInput {
 		const config = this._cachedConfigurationModel?.config ?? {};
 		const results = this._cachedResultsModel?.getValue() ?? '';
 		// Use the 'rawData' variant and pass modelUri
-		return this.instantiationService.invokeFunction(
+		const input = this.instantiationService.invokeFunction(
 			getOrMakeSearchEditorInput,
 			// eslint-disable-next-line local/code-no-any-casts
 			{ from: 'rawData', config, resultsContents: results, modelUri: newModelUri } as any // modelUri is not in the type, but we handle it below
 		);
+		input.setResultSources(this.resultSources);
+		if (this.hasResultBaseline()) {
+			input.setResultBaseline(this.getResultBaselineEntries());
+		}
+		return input;
 	}
 }
 

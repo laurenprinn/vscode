@@ -289,16 +289,20 @@ export class MultiDiffEditorWidgetImpl extends Disposable {
 			_element.replaceChildren();
 		}));
 
+		let initializedViewModel: MultiDiffEditorViewModel | undefined;
 		// Automatically select the first change in the first file when items are loaded
 		this._register(autorun(reader => {
 			/** @description Initialize first change */
 			const viewModel = this._viewModel.read(reader);
 			if (!viewModel) {
+				initializedViewModel = undefined;
 				return;
 			}
 
 			// Only initialize when loading is complete
 			if (!viewModel.isLoading.read(reader)) {
+				const isInitialLoad = initializedViewModel !== viewModel;
+				initializedViewModel = viewModel;
 				const items = viewModel.items.read(reader);
 				if (items.length === 0) {
 					return;
@@ -325,7 +329,7 @@ export class MultiDiffEditorWidgetImpl extends Disposable {
 				// session switch) must not steal focus from wherever the user is
 				// (such as the chat input), while a normal user-initiated open
 				// focuses the first change so the editor is ready to use.
-				this._navigateToChange('next', !this._preserveFocusOnLoad);
+				this._navigateToChange('next', isInitialLoad && !this._preserveFocusOnLoad);
 			}
 		}));
 

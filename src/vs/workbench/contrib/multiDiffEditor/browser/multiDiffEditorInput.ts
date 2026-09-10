@@ -255,7 +255,7 @@ export class MultiDiffEditorInput extends EditorInput implements ILanguageSuppor
 				contextKeys: r.contextKeys,
 				get options() {
 					return {
-						...getReadonlyConfiguration(modified?.object.isReadonly() ?? true),
+						...getReadonlyConfiguration(r.isModifiedReadonly ?? modified?.object.isReadonly() ?? true),
 						...computeOptions(textResourceConfigurationService.getValue(uri)),
 					} satisfies IDiffEditorOptions;
 				},

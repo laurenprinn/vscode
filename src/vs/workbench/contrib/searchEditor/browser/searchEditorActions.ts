@@ -209,12 +209,13 @@ export const createEditorFromSearchResult =
 
 		const labelFormatter = (uri: URI): string => labelService.getUriLabel(uri, { relative: true });
 
-		const { text, matchRanges, config } = serializeSearchResultForEditor(searchResult, rawIncludePattern, rawExcludePattern, 0, labelFormatter, sortOrder);
+		const { text, matchRanges, config, sources } = await serializeSearchResultForEditor(searchResult, rawIncludePattern, rawExcludePattern, 0, labelFormatter, sortOrder);
 		config.onlyOpenEditors = onlySearchInOpenEditors;
 		const contextLines = configurationService.getValue<ISearchConfigurationProperties>('search').searchEditor.defaultNumberOfContextLines;
 
 		if (searchResult.isDirty || contextLines === 0 || contextLines === null) {
 			const input = instantiationService.invokeFunction(getOrMakeSearchEditorInput, { resultsContents: text, config, from: 'rawData' });
+			input.setResultSources(sources);
 			await editorService.openEditor(input, { pinned: true });
 			input.setMatchRanges(matchRanges);
 		} else {
