@@ -311,6 +311,7 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 		let synchronizer: SearchEditorDiffModelSynchronizer | undefined;
 		let resolverRegistration: { dispose(): void } | undefined;
 		let synchronizerResourcesListener: { dispose(): void } | undefined;
+		let searchEditorDisposeListener: { dispose(): void } | undefined;
 		try {
 			diffModels = await this.createResultsDiffModels(input, resultsModel);
 
@@ -355,11 +356,18 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 				sourceReferences: diffModels.sourceReferences,
 				previewModels: diffModels.previewModels,
 			});
+			searchEditorDisposeListener = input.onWillDispose(() => {
+				this.searchEditorResultLogService.info('Closing Search Editor result diff with its Search Editor');
+				void this.editorService.closeEditor({ editor: diffInput!, groupId: targetGroup.id }, { preserveFocus: true }).catch(error => {
+					this.searchEditorResultLogService.error('Failed to close Search Editor result diff with its Search Editor', error);
+				});
+			});
 			const disposeListener = diffInput.onWillDispose(() => {
 				this.searchEditorResultLogService.info('Closed Search Editor result diff');
 				const session = this.resultsDiffInputs.get(diffInput!);
 				this.resultsDiffInputs.delete(diffInput!);
 				disposeListener.dispose();
+				searchEditorDisposeListener?.dispose();
 				resolverRegistration?.dispose();
 				synchronizerResourcesListener?.dispose();
 				synchronizer?.dispose();
@@ -374,6 +382,7 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 			}
 		} catch (error) {
 			this.searchEditorResultLogService.error('Failed to create Search Editor result diff', error);
+			searchEditorDisposeListener?.dispose();
 			resolverRegistration?.dispose();
 			synchronizerResourcesListener?.dispose();
 			synchronizer?.dispose();
