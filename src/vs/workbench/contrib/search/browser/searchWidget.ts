@@ -60,7 +60,7 @@ export interface ISearchWidgetOptions {
 	preserveCase?: boolean;
 	_hideReplaceToggle?: boolean; // TODO: Search Editor's replace experience
 	showContextToggle?: boolean;
-	additionalSearchInputAction?: IAction;
+	additionalSearchInputActions?: readonly IAction[];
 	inputBoxStyles: IInputBoxStyles;
 	toggleStyles: IToggleStyles;
 	notebookOptions?: NotebookToggleState;
@@ -530,10 +530,10 @@ export class SearchWidget extends Widget {
 			dom.append(searchInputContainer, this.showContextToggle.domNode);
 		}
 
-		if (options.additionalSearchInputAction) {
+		if (options.additionalSearchInputActions) {
 			const actionBar = this._register(new ActionBar(searchInputContainer));
 			actionBar.domNode.classList.add('search-widget-additional-action');
-			actionBar.push(options.additionalSearchInputAction, { icon: true, label: false });
+			actionBar.push(options.additionalSearchInputActions, { icon: true, label: false });
 		}
 	}
 

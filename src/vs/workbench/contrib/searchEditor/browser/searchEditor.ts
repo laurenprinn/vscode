@@ -10,19 +10,24 @@ import { Action } from '../../../../base/common/actions.js';
 import { Delayer } from '../../../../base/common/async.js';
 import { CancellationToken } from '../../../../base/common/cancellation.js';
 import { generateUuid } from '../../../../base/common/uuid.js';
+import { MarkdownString } from '../../../../base/common/htmlContent.js';
 import { KeyCode, KeyMod } from '../../../../base/common/keyCodes.js';
-import { DisposableStore } from '../../../../base/common/lifecycle.js';
+import { DisposableStore, MutableDisposable } from '../../../../base/common/lifecycle.js';
 import { ResourceMap } from '../../../../base/common/map.js';
 import { Schemas } from '../../../../base/common/network.js';
 import { isEqual, joinPath } from '../../../../base/common/resources.js';
 import { assertReturnsDefined } from '../../../../base/common/types.js';
 import { URI } from '../../../../base/common/uri.js';
 import './media/searchEditor.css';
+import { IViewZone, MouseTargetType } from '../../../../editor/browser/editorBrowser.js';
 import { ICodeEditorWidgetOptions } from '../../../../editor/browser/widget/codeEditor/codeEditorWidget.js';
+import { EditorOption } from '../../../../editor/common/config/editorOptions.js';
 import { Position } from '../../../../editor/common/core/position.js';
 import { Range } from '../../../../editor/common/core/range.js';
 import { Selection } from '../../../../editor/common/core/selection.js';
-import { ICodeEditorViewState } from '../../../../editor/common/editorCommon.js';
+import { linesDiffComputers } from '../../../../editor/common/diff/linesDiffComputers.js';
+import { ICodeEditorViewState, IEditorDecorationsCollection } from '../../../../editor/common/editorCommon.js';
+import { IModelDeltaDecoration, ITextModel } from '../../../../editor/common/model.js';
 import { IModelService } from '../../../../editor/common/services/model.js';
 import { ITextModelService } from '../../../../editor/common/services/resolverService.js';
 import { ILanguageService } from '../../../../editor/common/languages/language.js';
@@ -54,10 +59,10 @@ import { SearchWidget } from '../../search/browser/searchWidget.js';
 import { ITextQueryBuilderOptions, QueryBuilder } from '../../../services/search/common/queryBuilder.js';
 import { getOutOfWorkspaceEditorResources } from '../../search/common/search.js';
 import { SearchModelImpl } from '../../search/browser/searchTreeModel/searchModel.js';
-import { InSearchEditor, OpenSearchEditorResultsDiffCommandId, SearchEditorID, SearchEditorInputTypeId, SearchConfiguration } from './constants.js';
+import { ApplyAllSearchEditorResultChangesCommandId, ApplySearchEditorInlineResultChangeCommandId, InSearchEditor, NextSearchEditorInlineResultChangeCommandId, OpenSearchEditorResultsInlineDiffCommandId, PreviousSearchEditorInlineResultChangeCommandId, SearchEditorID, SearchEditorInlineDiffVisible, SearchEditorInputTypeId, SearchConfiguration } from './constants.js';
 import type { SearchEditorInput } from './searchEditorInput.js';
-import { applySearchResultLines, computeSearchResultHash, extractSearchResultSourceLabels, parseSearchResultLines, resolveSearchResultLineText, SearchResultLine, SearchResultSource, serializeSearchResultForEditor } from './searchEditorSerialization.js';
-import { GroupDirection, IEditorGroup, IEditorGroupsService } from '../../../services/editor/common/editorGroupsService.js';
+import { extractSearchResultSourceLabels, getSearchResultInsertAnchorLineNumber, mergeSearchResultLines, parseSearchResultLines, rebaseSearchResultLines, SearchResultLine, SearchResultSource, serializeSearchResultForEditor } from './searchEditorSerialization.js';
+import { IEditorGroup, IEditorGroupsService } from '../../../services/editor/common/editorGroupsService.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { IPatternInfo, ISearchComplete, ISearchConfigurationProperties, ITextQuery, SearchSortOrder } from '../../../services/search/common/search.js';
 import { searchDetailsIcon } from '../../search/browser/searchIcons.js';
@@ -68,7 +73,6 @@ import { INotificationService } from '../../../../platform/notification/common/n
 import { IEditorOptions } from '../../../../platform/editor/common/editor.js';
 import { renderSearchMessage } from '../../search/browser/searchMessage.js';
 import { EditorExtensionsRegistry, IEditorContributionDescription } from '../../../../editor/browser/editorExtensions.js';
-import { ITextModel } from '../../../../editor/common/model.js';
 import { UnusualLineTerminatorsDetector } from '../../../../editor/contrib/unusualLineTerminators/browser/unusualLineTerminators.js';
 import { defaultToggleStyles, getInputBoxStyle } from '../../../../platform/theme/browser/defaultStyles.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
@@ -76,30 +80,25 @@ import { SearchContext } from '../../search/common/constants.js';
 import { getDefaultHoverDelegate } from '../../../../base/browser/ui/hover/hoverDelegateFactory.js';
 import { IHoverService } from '../../../../platform/hover/browser/hover.js';
 import { ISearchResult } from '../../search/browser/searchTreeModel/searchTreeCommon.js';
-import { MultiDiffEditorInput } from '../../multiDiffEditor/browser/multiDiffEditorInput.js';
-import { IMultiDiffSourceResolverService, MultiDiffEditorItem } from '../../multiDiffEditor/browser/multiDiffSourceResolverService.js';
-import { SearchEditorDiffModel, SearchEditorDiffModelSynchronizer, SearchEditorDiffScheme } from './searchEditorDiffModel.js';
 import { ISearchEditorResultLogService } from './searchEditorResultLogService.js';
 
-const RESULT_LINE_REGEX = /^(\s+)(\d+)(: |  )(\s*)(.*)$/;
+const RESULT_LINE_REGEX = /^(\s+)(\d+)[+-]?(: |  )(\s*)(.*)$/;
 const FILE_LINE_REGEX = /^(\S.*):$/;
 const DEFAULT_QUERY_EDITOR_LAYOUT_OFFSET = 28;
 
 type SearchEditorViewState = ICodeEditorViewState & { focused: 'input' | 'editor' };
 
-type SearchEditorDiffModels = {
+type SearchEditorResultChangeModel = { resource: URI; originalModel: ITextModel; modifiedModel: ITextModel };
+
+type SearchEditorResultChangeModels = {
 	sourceReferences: DisposableStore;
 	previewModels: DisposableStore;
-	synchronizedPreviewModels: SearchEditorDiffModel[];
-	resultHashText: string[];
-	sourceHashText: string[];
+	synchronizedPreviewModels: SearchEditorResultChangeModel[];
 };
 
-type SearchEditorDiffSession = {
-	searchEditorInput: SearchEditorInput;
-	synchronizer: SearchEditorDiffModelSynchronizer;
-	sourceReferences: DisposableStore;
-	previewModels: DisposableStore;
+type SearchEditorInlineDiff = {
+	decorations: IModelDeltaDecoration[];
+	previews: { afterLineNumber: number; sourceText?: string; mergedText?: string }[];
 };
 
 export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> {
@@ -110,6 +109,9 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 	private queryEditorWidget!: SearchWidget;
 	private get searchResultEditor() { return this.editorControl!; }
 	private queryEditorContainer!: HTMLElement;
+	private inlineResultsDiffDecorations!: IEditorDecorationsCollection;
+	private resultChangesDecorations!: IEditorDecorationsCollection;
+	private inlineDiffVisibleContextKey!: IContextKey<boolean>;
 	private dimension?: DOM.Dimension;
 	private inputPatternIncludes!: IncludePatternInputWidget;
 	private inputPatternExcludes!: ExcludePatternInputWidget;
@@ -129,10 +131,17 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 	private searchModel: SearchModelImpl;
 	private ongoingOperations: number = 0;
 	private updatingModelForSearch: boolean = false;
-	private openResultsDiffAction!: Action;
+	private openResultsInlineDiffAction!: Action;
+	private previousInlineResultChangeAction!: Action;
+	private nextInlineResultChangeAction!: Action;
+	private applyAllResultChangesAction!: Action;
+	private readonly inlineResultsDiffSession = this._register(new MutableDisposable<DisposableStore>());
+	private readonly resultChangesSourceSession = this._register(new MutableDisposable<DisposableStore>());
+	private readonly inlineResultChanges = new Map<number, { resource: URI; text: string }>();
+	private inlineResultsDiffViewZoneIds: string[] = [];
+	private inlineResultsDiffPreviousGlyphMargin: boolean | undefined;
+	private showingInlineResultsDiff = false;
 	private resultsDiffUpdate = 0;
-	private readonly resultsDiffInputs = new Map<MultiDiffEditorInput, SearchEditorDiffSession>();
-	private readonly openingResultsDiffInputs = new Set<SearchEditorInput>();
 	private confirmedUnappliedChanges: { input: SearchEditorInput; versionId: number } | undefined;
 
 	constructor(
@@ -158,7 +167,6 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 		@IHoverService private readonly hoverService: IHoverService,
 		@ITextModelService private readonly textModelService: ITextModelService,
 		@ILanguageService private readonly languageService: ILanguageService,
-		@IMultiDiffSourceResolverService private readonly multiDiffSourceResolverService: IMultiDiffSourceResolverService,
 		@ISearchEditorResultLogService private readonly searchEditorResultLogService: ISearchEditorResultLogService,
 		@IKeybindingService private readonly keybindingService: IKeybindingService,
 		@IDialogService private readonly dialogService: IDialogService,
@@ -179,10 +187,21 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 		this.queryEditorContainer = DOM.append(this.container, DOM.$('.query-container'));
 		const searchResultContainer = DOM.append(this.container, DOM.$('.search-results'));
 		super.createEditor(searchResultContainer);
+		this.inlineResultsDiffDecorations = this.searchResultEditor.createDecorationsCollection();
+		this.resultChangesDecorations = this.searchResultEditor.createDecorationsCollection();
+		this._register(this.searchResultEditor.onMouseDown(event => {
+			const lineNumber = event.target.range?.startLineNumber;
+			if (event.event.leftButton && event.target.type === MouseTargetType.GUTTER_GLYPH_MARGIN && lineNumber !== undefined && this.inlineResultChanges.has(lineNumber)) {
+				event.event.preventDefault();
+				event.event.stopPropagation();
+				void this.commandService.executeCommand(ApplySearchEditorInlineResultChangeCommandId, lineNumber);
+			}
+		}));
 		this.registerEditorListeners();
 
 		const scopedContextKeyService = assertReturnsDefined(this.scopedContextKeyService);
 		InSearchEditor.bindTo(scopedContextKeyService).set(true);
+		this.inlineDiffVisibleContextKey = SearchEditorInlineDiffVisible.bindTo(scopedContextKeyService);
 
 		this.createQueryEditor(
 			this.queryEditorContainer,
@@ -194,15 +213,36 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 
 	private createQueryEditor(container: HTMLElement, scopedInstantiationService: IInstantiationService, inputBoxFocusedContextKey: IContextKey<boolean>) {
 		const searchEditorInputboxStyles = getInputBoxStyle({ inputBorder: searchEditorTextInputBorder });
-		this.openResultsDiffAction = this._register(new Action(
-			OpenSearchEditorResultsDiffCommandId,
-			this.keybindingService.appendKeybinding(localize('searchEditor.openResultsDiff', "Open Search Result Changes"), OpenSearchEditorResultsDiffCommandId),
-			ThemeIcon.asClassName(Codicon.diffMultiple),
+		this.openResultsInlineDiffAction = this._register(new Action(
+			OpenSearchEditorResultsInlineDiffCommandId,
+			this.keybindingService.appendKeybinding(localize('searchEditor.openResultsInlineDiff', "View Inline Changes"), OpenSearchEditorResultsInlineDiffCommandId),
+			ThemeIcon.asClassName(Codicon.diffSingle),
 			false,
-			() => this.openResultsDiff()
+			() => this.toggleResultsInlineDiff()
+		));
+		this.previousInlineResultChangeAction = this._register(new Action(
+			PreviousSearchEditorInlineResultChangeCommandId,
+			this.keybindingService.appendKeybinding(localize('searchEditor.previousInlineResultChange', "Previous Inline Change"), PreviousSearchEditorInlineResultChangeCommandId),
+			ThemeIcon.asClassName(Codicon.arrowUp),
+			false,
+			() => this.commandService.executeCommand(PreviousSearchEditorInlineResultChangeCommandId)
+		));
+		this.nextInlineResultChangeAction = this._register(new Action(
+			NextSearchEditorInlineResultChangeCommandId,
+			this.keybindingService.appendKeybinding(localize('searchEditor.nextInlineResultChange', "Next Inline Change"), NextSearchEditorInlineResultChangeCommandId),
+			ThemeIcon.asClassName(Codicon.arrowDown),
+			false,
+			() => this.commandService.executeCommand(NextSearchEditorInlineResultChangeCommandId)
+		));
+		this.applyAllResultChangesAction = this._register(new Action(
+			ApplyAllSearchEditorResultChangesCommandId,
+			this.keybindingService.appendKeybinding(localize('searchEditor.applyAllResultChanges', "Apply All Changes"), ApplyAllSearchEditorResultChangesCommandId),
+			ThemeIcon.asClassName(Codicon.checkAll),
+			false,
+			() => this.commandService.executeCommand(ApplyAllSearchEditorResultChangesCommandId)
 		));
 
-		this.queryEditorWidget = this._register(scopedInstantiationService.createInstance(SearchWidget, container, { _hideReplaceToggle: true, showContextToggle: true, additionalSearchInputAction: this.openResultsDiffAction, inputBoxStyles: searchEditorInputboxStyles, toggleStyles: defaultToggleStyles }));
+		this.queryEditorWidget = this._register(scopedInstantiationService.createInstance(SearchWidget, container, { _hideReplaceToggle: true, showContextToggle: true, additionalSearchInputActions: [this.openResultsInlineDiffAction, this.previousInlineResultChangeAction, this.nextInlineResultChangeAction, this.applyAllResultChangesAction], inputBoxStyles: searchEditorInputboxStyles, toggleStyles: defaultToggleStyles }));
 		this.unappliedChangesStatus = DOM.append(container, DOM.$('.search-editor-unapplied-changes-status', { role: 'status', 'aria-live': 'polite' }));
 		this.unappliedChangesStatus.hidden = true;
 		this._register(this.queryEditorWidget.onReplaceToggled(() => this.reLayout()));
@@ -281,125 +321,219 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 			});
 	}
 
-	async openResultsDiff(): Promise<void> {
-		if (!this.openResultsDiffAction.enabled) {
-			this.searchEditorResultLogService.info('Open diff skipped: no unapplied Search Editor changes');
-			this.notificationService.info(localize('searchEditor.noResultChangesToApply', "No search result changes to apply."));
+	async toggleResultsInlineDiff(): Promise<void> {
+		if (this.showingInlineResultsDiff) {
+			this.hideResultsInlineDiff();
 			return;
 		}
 
 		const input = this.getInput();
 		const resultsModel = this.searchResultEditor.getModel();
 		if (!input || !resultsModel) {
-			this.searchEditorResultLogService.warn('Open diff skipped: Search Editor input or results model is unavailable');
 			return;
 		}
-		const existingDiffInput = [...this.resultsDiffInputs].find(([, session]) => session.searchEditorInput === input)?.[0];
-		if (existingDiffInput) {
-			this.searchEditorResultLogService.info('Revealing existing Search Editor result diff');
-			await this.editorService.openEditor(existingDiffInput, { pinned: true, revealIfOpened: true });
+
+		const diffModels = await this.createResultChangeModels(input, resultsModel);
+		const changedModels = diffModels.synchronizedPreviewModels.filter(model => model.originalModel.getValue() !== model.modifiedModel.getValue());
+		if (changedModels.length === 0) {
+			diffModels.previewModels.dispose();
+			diffModels.sourceReferences.dispose();
+			this.notificationService.info(localize('searchEditor.noResultChanges', "Search results match the current source files."));
 			return;
 		}
-		if (this.openingResultsDiffInputs.has(input)) {
-			this.searchEditorResultLogService.info('Open diff skipped: Search Editor result diff is already opening');
-			return;
+
+		const session = new DisposableStore();
+		session.add(diffModels.sourceReferences);
+		session.add(diffModels.previewModels);
+		const baselineLines = new ResourceMap<readonly string[]>();
+		for (const diffModel of diffModels.synchronizedPreviewModels) {
+			baselineLines.set(diffModel.resource, input.getResultBaseline(diffModel.resource) ?? diffModel.originalModel.getLinesContent());
 		}
-		this.openingResultsDiffInputs.add(input);
-
-		let diffModels: SearchEditorDiffModels | undefined;
-		let diffInput: MultiDiffEditorInput | undefined;
-		let synchronizer: SearchEditorDiffModelSynchronizer | undefined;
-		let resolverRegistration: { dispose(): void } | undefined;
-		let synchronizerResourcesListener: { dispose(): void } | undefined;
-		let searchEditorDisposeListener: { dispose(): void } | undefined;
-		try {
-			diffModels = await this.createResultsDiffModels(input, resultsModel);
-
-			const [resultHash, sourceHash] = await Promise.all([
-				computeSearchResultHash(diffModels.resultHashText.join('\n')),
-				computeSearchResultHash(diffModels.sourceHashText.join('\n')),
-			]);
-			if (resultHash === sourceHash || diffModels.synchronizedPreviewModels.length === 0) {
-				this.searchEditorResultLogService.info('Open diff skipped after comparison: Search Editor results match source files');
-				this.notificationService.info(localize('searchEditor.noResultChanges', "Search results match the current source files."));
-				return;
-			}
-
-			synchronizer = new SearchEditorDiffModelSynchronizer(resultsModel, () => input.getResultSources(), diffModels.synchronizedPreviewModels);
-			this.searchEditorResultLogService.info(`Created Search Editor result diff (changedFiles=${synchronizer.resources.value.length})`);
-			synchronizerResourcesListener = synchronizer.resources.onDidChange(() => {
-				const count = synchronizer!.resources.value.length;
-				this.searchEditorResultLogService.debug(`Search Editor result diff resources changed (changedFiles=${count})`);
-				input.setUnappliedChangesCount(count);
-				if (this.getInput() === input) {
-					this.openResultsDiffAction.enabled = count > 0;
-					this.updateUnappliedChangesStatus(count);
-				}
-			});
-			const multiDiffSource = URI.from({ scheme: SearchEditorDiffScheme, path: `/search-result-changes-${generateUuid()}` });
-			resolverRegistration = this.multiDiffSourceResolverService.registerResolver({
-				canHandleUri: uri => isEqual(uri, multiDiffSource),
-				resolveDiffSource: () => Promise.resolve({ resources: synchronizer!.resources }),
-			});
-			diffInput = this.instantiationService.createInstance(
-				MultiDiffEditorInput,
-				multiDiffSource,
-				localize('searchEditor.resultChanges', "Search Result Changes"),
-				undefined,
-				true
-			);
-			const targetGroup = this.editorGroupService.findGroup({ direction: GroupDirection.RIGHT }, this.group)
-				?? this.editorGroupService.addGroup(this.group, GroupDirection.RIGHT);
-			this.resultsDiffInputs.set(diffInput, {
-				searchEditorInput: input,
-				synchronizer,
-				sourceReferences: diffModels.sourceReferences,
-				previewModels: diffModels.previewModels,
-			});
-			searchEditorDisposeListener = input.onWillDispose(() => {
-				this.searchEditorResultLogService.info('Closing Search Editor result diff with its Search Editor');
-				void this.editorService.closeEditor({ editor: diffInput!, groupId: targetGroup.id }, { preserveFocus: true }).catch(error => {
-					this.searchEditorResultLogService.error('Failed to close Search Editor result diff with its Search Editor', error);
-				});
-			});
-			const disposeListener = diffInput.onWillDispose(() => {
-				this.searchEditorResultLogService.info('Closed Search Editor result diff');
-				const session = this.resultsDiffInputs.get(diffInput!);
-				this.resultsDiffInputs.delete(diffInput!);
-				disposeListener.dispose();
-				searchEditorDisposeListener?.dispose();
-				resolverRegistration?.dispose();
-				synchronizerResourcesListener?.dispose();
-				synchronizer?.dispose();
-				session?.previewModels.dispose();
-				session?.sourceReferences.dispose();
-			});
-			if (!await this.editorService.openEditor(diffInput, { pinned: true }, targetGroup)) {
-				this.searchEditorResultLogService.warn('Failed to open Search Editor result diff');
-				diffInput.dispose();
-			} else {
-				this.searchEditorResultLogService.info('Opened Search Editor result diff');
-			}
-		} catch (error) {
-			this.searchEditorResultLogService.error('Failed to create Search Editor result diff', error);
-			searchEditorDisposeListener?.dispose();
-			resolverRegistration?.dispose();
-			synchronizerResourcesListener?.dispose();
-			synchronizer?.dispose();
-			diffModels?.previewModels.dispose();
-			diffModels?.sourceReferences.dispose();
-			diffInput?.dispose();
-			throw error;
-		} finally {
-			this.openingResultsDiffInputs.delete(input);
-			if (!diffInput) {
-				diffModels?.previewModels.dispose();
-				diffModels?.sourceReferences.dispose();
-			}
+		if (!input.hasResultBaseline()) {
+			input.setResultBaseline([...baselineLines].map(([resource, lines]) => ({ resource, lines })));
 		}
+		const updateDecorations = () => this.updateInlineResultsDiff(input, resultsModel, diffModels.synchronizedPreviewModels, baselineLines);
+		session.add(resultsModel.onDidChangeContent(updateDecorations));
+		for (const diffModel of diffModels.synchronizedPreviewModels) {
+			session.add(diffModel.originalModel.onDidChangeContent(updateDecorations));
+		}
+		this.inlineResultsDiffSession.value = session;
+
+		this.inlineResultsDiffPreviousGlyphMargin = this.searchResultEditor.getOption(EditorOption.glyphMargin);
+		this.searchResultEditor.updateOptions({ glyphMargin: true });
+		updateDecorations();
+		this.showingInlineResultsDiff = true;
+		this.inlineDiffVisibleContextKey.set(true);
+		this.openResultsInlineDiffAction.checked = true;
+		this.openResultsInlineDiffAction.enabled = true;
+		this.updateInlineResultChangeActions();
+		this.searchResultEditor.focus();
 	}
 
-	private async createResultsDiffModels(input: SearchEditorInput, resultsModel: ITextModel): Promise<SearchEditorDiffModels> {
+	private hideResultsInlineDiff(): void {
+		this.showingInlineResultsDiff = false;
+		this.inlineDiffVisibleContextKey?.set(false);
+		this.inlineResultsDiffDecorations?.clear();
+		this.clearInlineResultsDiffViewZones();
+		if (this.inlineResultsDiffPreviousGlyphMargin !== undefined) {
+			this.searchResultEditor.updateOptions({ glyphMargin: this.inlineResultsDiffPreviousGlyphMargin });
+			this.inlineResultsDiffPreviousGlyphMargin = undefined;
+		}
+		this.inlineResultChanges.clear();
+		this.inlineResultsDiffSession.clear();
+		if (this.openResultsInlineDiffAction) {
+			this.openResultsInlineDiffAction.checked = false;
+		}
+		this.updateInlineResultChangeActions();
+		this.updateResultChangesActions();
+	}
+
+	private updateInlineResultsDiff(input: SearchEditorInput, resultsModel: ITextModel, diffModels: readonly SearchEditorResultChangeModel[], baselineLines: ResourceMap<readonly string[]>): void {
+		const { decorations, previews } = this.createInlineResultsDiff(input, resultsModel, diffModels, baselineLines);
+		this.inlineResultsDiffDecorations.set(decorations);
+		this.searchResultEditor.changeViewZones(accessor => {
+			for (const id of this.inlineResultsDiffViewZoneIds) {
+				accessor.removeZone(id);
+			}
+			this.inlineResultsDiffViewZoneIds = previews.map(preview => accessor.addZone(this.createInlineDiffPreviewZone(preview)));
+		});
+		this.updateInlineResultChangeActions();
+	}
+
+	private clearInlineResultsDiffViewZones(): void {
+		if (this.inlineResultsDiffViewZoneIds.length === 0) {
+			return;
+		}
+		this.searchResultEditor.changeViewZones(accessor => {
+			for (const id of this.inlineResultsDiffViewZoneIds) {
+				accessor.removeZone(id);
+			}
+		});
+		this.inlineResultsDiffViewZoneIds = [];
+	}
+
+	private createInlineDiffPreviewZone(preview: SearchEditorInlineDiff['previews'][number]): IViewZone {
+		const domNode = DOM.$('.search-editor-inline-diff-preview');
+		domNode.setAttribute('aria-hidden', 'true');
+		if (preview.sourceText !== undefined) {
+			this.appendInlineDiffPreviewRow(domNode, localize('searchEditor.inlineDiff.currentSource', "Current source"), preview.sourceText, preview.mergedText ?? '', 'removed');
+		}
+		if (preview.mergedText !== undefined) {
+			this.appendInlineDiffPreviewRow(domNode, localize('searchEditor.inlineDiff.mergedResult', "Merged result"), preview.mergedText, preview.sourceText ?? '', 'inserted');
+		}
+		return { afterLineNumber: preview.afterLineNumber, heightInLines: Number(preview.sourceText !== undefined) + Number(preview.mergedText !== undefined), domNode };
+	}
+
+	private appendInlineDiffPreviewRow(container: HTMLElement, label: string, text: string, comparisonText: string, kind: 'removed' | 'inserted'): void {
+		let prefixLength = 0;
+		while (prefixLength < text.length && prefixLength < comparisonText.length && text[prefixLength] === comparisonText[prefixLength]) {
+			prefixLength++;
+		}
+		let suffixLength = 0;
+		while (suffixLength < text.length - prefixLength && suffixLength < comparisonText.length - prefixLength && text[text.length - suffixLength - 1] === comparisonText[comparisonText.length - suffixLength - 1]) {
+			suffixLength++;
+		}
+
+		const row = DOM.append(container, DOM.$(`.search-editor-inline-diff-preview-row.${kind}`));
+		DOM.append(row, DOM.$('span.search-editor-inline-diff-preview-label', undefined, label));
+		const content = DOM.append(row, DOM.$('span.search-editor-inline-diff-preview-text'));
+		content.title = text;
+		DOM.append(content, document.createTextNode(text.slice(0, prefixLength)));
+		DOM.append(content, DOM.$(`span.search-editor-inline-diff-preview-change.${kind}`, undefined, text.slice(prefixLength, text.length - suffixLength)));
+		DOM.append(content, document.createTextNode(text.slice(text.length - suffixLength)));
+	}
+
+	private createInlineResultsDiff(input: SearchEditorInput, resultsModel: ITextModel, diffModels: readonly SearchEditorResultChangeModel[], baselineLines: ResourceMap<readonly string[]>): SearchEditorInlineDiff {
+		this.inlineResultChanges.clear();
+		const originalModels = new ResourceMap<ITextModel>();
+		for (const diffModel of diffModels) {
+			originalModels.set(diffModel.resource, diffModel.originalModel);
+		}
+
+		const decorations: IModelDeltaDecoration[] = [];
+		const previews: SearchEditorInlineDiff['previews'] = [];
+		const resultLines = parseSearchResultLines(resultsModel.getValue(), input.getResultSources());
+		const linesByResource = new ResourceMap<SearchResultLine[]>();
+		for (const resultLine of resultLines) {
+			const lines = linesByResource.get(resultLine.resource) ?? [];
+			lines.push(resultLine);
+			linesByResource.set(resultLine.resource, lines);
+		}
+		for (const resultLine of resultLines) {
+			const originalModel = originalModels.get(resultLine.resource);
+			if (!originalModel) {
+				continue;
+			}
+
+			const sourceLines = originalModel.getLinesContent();
+			const resourceBaselineLines = baselineLines.get(resultLine.resource) ?? sourceLines;
+			if (!mergeSearchResultLines(resourceBaselineLines, sourceLines, linesByResource.get(resultLine.resource) ?? []).changed) {
+				continue;
+			}
+			const { lines: modifiedLines, changed } = mergeSearchResultLines(resourceBaselineLines, sourceLines, [resultLine]);
+			if (!changed) {
+				continue;
+			}
+			const lineChange = linesDiffComputers.getLegacy().computeDiff(sourceLines, modifiedLines, { ignoreTrimWhitespace: false, maxComputationTimeMs: 1000, computeMoves: false }).changes[0];
+			if (!lineChange) {
+				continue;
+			}
+			const sourceText = sourceLines.slice(lineChange.original.startLineNumber - 1, lineChange.original.endLineNumberExclusive - 1).join(originalModel.getEOL());
+			const mergedText = modifiedLines.slice(lineChange.modified.startLineNumber - 1, lineChange.modified.endLineNumberExclusive - 1).join(originalModel.getEOL());
+			previews.push({
+				afterLineNumber: resultLine.resultLineNumber,
+				sourceText: lineChange.original.isEmpty ? undefined : sourceText,
+				mergedText: lineChange.modified.isEmpty ? undefined : mergedText,
+			});
+
+			decorations.push({
+				range: new Range(resultLine.resultLineNumber, 1, resultLine.resultLineNumber, 1),
+				options: {
+					description: 'search-editor-inline-diff-line',
+					glyphMarginClassName: `${ThemeIcon.asClassName(Codicon.check)} search-editor-inline-diff-apply`,
+					glyphMarginHoverMessage: new MarkdownString().appendText(localize('searchEditor.applyInlineResultChange', "Apply Search Result to Source File")),
+				}
+			});
+			this.inlineResultChanges.set(resultLine.resultLineNumber, { resource: resultLine.resource, text: modifiedLines.join(originalModel.getEOL()) });
+
+		}
+		return { decorations, previews };
+	}
+
+	getInlineResultChange(lineNumber = this.searchResultEditor.getPosition()?.lineNumber): { resource: URI; text: string } | undefined {
+		return lineNumber === undefined ? undefined : this.inlineResultChanges.get(lineNumber);
+	}
+
+	goToPreviousInlineResultChange(): void {
+		this.goToInlineResultChange(false);
+	}
+
+	goToNextInlineResultChange(): void {
+		this.goToInlineResultChange(true);
+	}
+
+	private goToInlineResultChange(next: boolean): void {
+		const lineNumbers = [...this.inlineResultChanges.keys()].sort((first, second) => first - second);
+		if (lineNumbers.length === 0) {
+			return;
+		}
+
+		const currentLineNumber = this.searchResultEditor.getPosition()?.lineNumber ?? (next ? 0 : Number.MAX_SAFE_INTEGER);
+		const lineNumber = next
+			? lineNumbers.find(candidate => candidate > currentLineNumber) ?? lineNumbers[0]
+			: lineNumbers.findLast(candidate => candidate < currentLineNumber) ?? lineNumbers[lineNumbers.length - 1];
+		this.searchResultEditor.setPosition(new Position(lineNumber, 1));
+		this.searchResultEditor.revealLineInCenter(lineNumber);
+		this.searchResultEditor.focus();
+	}
+
+	private updateInlineResultChangeActions(): void {
+		const enabled = this.showingInlineResultsDiff && this.inlineResultChanges.size > 0;
+		this.previousInlineResultChangeAction.enabled = enabled;
+		this.nextInlineResultChangeAction.enabled = enabled;
+	}
+
+	private async createResultChangeModels(input: SearchEditorInput, resultsModel: ITextModel): Promise<SearchEditorResultChangeModels> {
 		const resultLines = parseSearchResultLines(resultsModel.getValue(), input.getResultSources());
 		const linesByResource = new ResourceMap<SearchResultLine[]>();
 		for (const resultLine of resultLines) {
@@ -411,30 +545,19 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 
 		const sourceReferences = new DisposableStore();
 		const previewModels = new DisposableStore();
-		const synchronizedPreviewModels: SearchEditorDiffModel[] = [];
-		const resultHashText: string[] = [];
-		const sourceHashText: string[] = [];
+		const synchronizedPreviewModels: SearchEditorResultChangeModel[] = [];
 		try {
 			for (const [resource, lines] of linesByResource) {
 				const reference = sourceReferences.add(await this.textModelService.createModelReference(resource));
 				const sourceModel = reference.object.textEditorModel;
-				for (const line of lines) {
-					if (line.sourceLineNumber > sourceModel.getLineCount()) {
-						continue;
-					}
-					const sourceText = sourceModel.getLineContent(line.sourceLineNumber);
-					const hashKey = `${resource.toString()}\0${line.sourceLineNumber}\0`;
-					resultHashText.push(hashKey + resolveSearchResultLineText(sourceText, line.text));
-					sourceHashText.push(hashKey + sourceText);
-				}
-
-				const { lines: modifiedLines } = applySearchResultLines(sourceModel.getLinesContent(), lines);
-				const previewUri = URI.from({ scheme: SearchEditorDiffScheme, authority: generateUuid(), path: resource.path });
+				const sourceLines = sourceModel.getLinesContent();
+				const baselineLines = input.getResultBaseline(resource) ?? sourceLines;
+				const { lines: modifiedLines } = mergeSearchResultLines(baselineLines, sourceLines, lines);
+				const previewUri = URI.from({ scheme: 'search-editor-inline-diff', authority: generateUuid(), path: resource.path });
 				const previewModel = previewModels.add(this.modelService.createModel(modifiedLines.join(sourceModel.getEOL()), this.languageService.createById(sourceModel.getLanguageId()), previewUri));
-				const item = new MultiDiffEditorItem(resource, previewUri, resource, undefined, undefined, false);
-				synchronizedPreviewModels.push({ resource, originalModel: sourceModel, modifiedModel: previewModel, item });
+				synchronizedPreviewModels.push({ resource, originalModel: sourceModel, modifiedModel: previewModel });
 			}
-			return { sourceReferences, previewModels, synchronizedPreviewModels, resultHashText, sourceHashText };
+			return { sourceReferences, previewModels, synchronizedPreviewModels };
 		} catch (error) {
 			previewModels.dispose();
 			sourceReferences.dispose();
@@ -442,9 +565,97 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 		}
 	}
 
-	private updateOpenResultsDiffAction(): void {
+	async getAllResultChanges(): Promise<{ resource: URI; range: Range; text: string; versionId: number }[]> {
+		const input = this.getInput();
+		const resultsModel = this.searchResultEditor.getModel();
+		if (!input || !resultsModel) {
+			return [];
+		}
+
+		const diffModels = await this.createResultChangeModels(input, resultsModel);
+		try {
+			return diffModels.synchronizedPreviewModels
+				.filter(model => model.originalModel.getValue() !== model.modifiedModel.getValue())
+				.map(model => ({ resource: model.resource, range: model.originalModel.getFullModelRange(), text: model.modifiedModel.getValue(), versionId: model.originalModel.getVersionId() }));
+		} finally {
+			diffModels.previewModels.dispose();
+			diffModels.sourceReferences.dispose();
+		}
+	}
+
+	async rebaseAppliedResultChanges(resources: readonly URI[]): Promise<void> {
+		const input = this.getInput();
+		const resultsModel = this.searchResultEditor.getModel();
+		if (!input || !resultsModel) {
+			return;
+		}
+
+		const sources = this.resolveResultSources(input, resultsModel.getValue());
+		const resultLines = parseSearchResultLines(resultsModel.getValue(), sources);
+		const baselineLines = new ResourceMap<readonly string[]>();
+		for (const entry of input.getResultBaselineEntries()) {
+			baselineLines.set(entry.resource, entry.lines);
+		}
+		const rebasedResources: URI[] = [];
+		const sourceReferences = new DisposableStore();
+		try {
+			const seen = new ResourceMap<boolean>();
+			for (const resource of resources) {
+				if (seen.has(resource)) {
+					continue;
+				}
+				seen.set(resource, true);
+				const lines = resultLines.filter(line => isEqual(line.resource, resource));
+				if (lines.length === 0) {
+					continue;
+				}
+				const reference = sourceReferences.add(await this.textModelService.createModelReference(resource));
+				const sourceLines = reference.object.textEditorModel.getLinesContent();
+				if (mergeSearchResultLines(baselineLines.get(resource) ?? sourceLines, sourceLines, lines).changed) {
+					continue;
+				}
+				baselineLines.set(resource, sourceLines);
+				rebasedResources.push(resource);
+			}
+			if (rebasedResources.length === 0) {
+				return;
+			}
+
+			resultsModel.setValue(rebaseSearchResultLines(resultsModel.getValue(), sources, rebasedResources));
+			input.setResultBaseline([...baselineLines].map(([resource, lines]) => ({ resource, lines })));
+		} finally {
+			sourceReferences.dispose();
+		}
+	}
+
+	private async captureResultBaseline(input: SearchEditorInput, sources: readonly SearchResultSource[]): Promise<void> {
+		const sourceReferences = new DisposableStore();
+		const entries: { resource: URI; lines: readonly string[] }[] = [];
+		try {
+			const seen = new ResourceMap<boolean>();
+			for (const source of sources) {
+				if (seen.has(source.resource)) {
+					continue;
+				}
+				seen.set(source.resource, true);
+				try {
+					const reference = sourceReferences.add(await this.textModelService.createModelReference(source.resource));
+					entries.push({ resource: source.resource, lines: reference.object.textEditorModel.getLinesContent() });
+				} catch (error) {
+					this.logService.warn(`SearchEditor: Failed to capture result baseline for ${source.resource.toString()}`, error);
+				}
+			}
+			input.setResultBaseline(entries);
+		} finally {
+			sourceReferences.dispose();
+		}
+	}
+
+	private updateResultChangesActions(): void {
 		const update = ++this.resultsDiffUpdate;
-		this.openResultsDiffAction.enabled = false;
+		this.resultChangesDecorations.clear();
+		this.openResultsInlineDiffAction.enabled = false;
+		this.applyAllResultChangesAction.enabled = false;
 		void this.resultsDiffDelayer.trigger(async () => {
 			const input = this.getInput();
 			const resultsModel = this.searchResultEditor.getModel();
@@ -453,13 +664,18 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 			}
 
 			try {
-				const { mappedFileCount, changedFileCount } = await this.getUnappliedChangesCount(input, resultsModel);
+				const { mappedFileCount, changedFileCount, decorations, sourceSession } = await this.getUnappliedChangesCount(input, resultsModel);
 
 				if (update === this.resultsDiffUpdate) {
+					this.resultChangesSourceSession.value = sourceSession;
 					this.searchEditorResultLogService.debug(`Compared Search Editor results with source files (mappedFiles=${mappedFileCount}, changedFiles=${changedFileCount})`);
-					this.openResultsDiffAction.enabled = changedFileCount > 0;
+					this.openResultsInlineDiffAction.enabled = changedFileCount > 0;
+					this.applyAllResultChangesAction.enabled = changedFileCount > 0;
+					this.resultChangesDecorations.set(decorations);
 					input.setUnappliedChangesCount(changedFileCount);
 					this.updateUnappliedChangesStatus(changedFileCount);
+				} else {
+					sourceSession.dispose();
 				}
 			} catch (error) {
 				this.searchEditorResultLogService.error('Failed to compare Search Editor results with source files', error);
@@ -468,7 +684,7 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 		});
 	}
 
-	private async getUnappliedChangesCount(input: SearchEditorInput, resultsModel: ITextModel): Promise<{ mappedFileCount: number; changedFileCount: number }> {
+	private async getUnappliedChangesCount(input: SearchEditorInput, resultsModel: ITextModel): Promise<{ mappedFileCount: number; changedFileCount: number; decorations: IModelDeltaDecoration[]; sourceSession: DisposableStore }> {
 		const resultSources = this.resolveResultSources(input, resultsModel.getValue());
 		input.setResultSources(resultSources);
 		const linesByResource = new ResourceMap<SearchResultLine[]>();
@@ -478,58 +694,57 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 			linesByResource.set(resultLine.resource, lines);
 		}
 
-		const sourceReferences = new DisposableStore();
+		const sourceSession = new DisposableStore();
 		try {
 			let changedFileCount = 0;
+			const decorations: IModelDeltaDecoration[] = [];
 			for (const [resource, lines] of linesByResource) {
-				const reference = sourceReferences.add(await this.textModelService.createModelReference(resource));
+				const reference = sourceSession.add(await this.textModelService.createModelReference(resource));
 				const sourceModel = reference.object.textEditorModel;
+				sourceSession.add(sourceModel.onDidChangeContent(() => this.updateResultChangesActions()));
+				let changedLineCount = 0;
+				const sourceLines = sourceModel.getLinesContent();
+				const baselineLines = input.getResultBaseline(resource) ?? sourceLines;
+				if (!mergeSearchResultLines(baselineLines, sourceLines, lines).changed) {
+					continue;
+				}
 				for (const line of lines) {
-					if (line.sourceLineNumber > sourceModel.getLineCount()) {
-						continue;
-					}
-					const sourceText = sourceModel.getLineContent(line.sourceLineNumber);
-					if (resolveSearchResultLineText(sourceText, line.text) !== sourceText) {
-						changedFileCount++;
-						break;
+					if (mergeSearchResultLines(baselineLines, sourceLines, [line]).changed) {
+						changedLineCount++;
+						decorations.push({
+							range: new Range(line.resultLineNumber, 1, line.resultLineNumber, 1),
+							options: {
+								description: 'search-editor-result-modified',
+								linesDecorationsClassName: 'search-editor-result-modified',
+								linesDecorationsTooltip: localize('searchEditor.resultModified', "Search result differs from the current source."),
+							},
+						});
 					}
 				}
-			}
-			return { mappedFileCount: linesByResource.size, changedFileCount };
-		} finally {
-			sourceReferences.dispose();
-		}
-	}
-
-	private async refreshResultsDiffs(input: SearchEditorInput, resultsModel: ITextModel): Promise<void> {
-		const sessions = [...this.resultsDiffInputs].filter(([, session]) => session.searchEditorInput === input);
-		if (sessions.length === 0) {
-			return;
-		}
-		await Promise.all(sessions.map(async ([diffInput, session]) => {
-			let diffModels: SearchEditorDiffModels | undefined;
-			try {
-				diffModels = await this.createResultsDiffModels(input, resultsModel);
-				if (this.resultsDiffInputs.get(diffInput) !== session) {
-					diffModels.previewModels.dispose();
-					diffModels.sourceReferences.dispose();
-					return;
+				if (changedLineCount > 0) {
+					changedFileCount++;
+					const fileLineNumber = lines[0].resultFileLineNumber;
+					const fileLineMaxColumn = resultsModel.getLineMaxColumn(fileLineNumber);
+					decorations.push({
+						range: new Range(fileLineNumber, fileLineMaxColumn, fileLineNumber, fileLineMaxColumn),
+						options: {
+							description: 'search-editor-file-modified',
+							showIfCollapsed: true,
+							after: {
+								content: changedLineCount === 1
+									? localize('searchEditor.fileModifiedSingle', "  1 unapplied change")
+									: localize('searchEditor.fileModifiedMultiple', "  {0} unapplied changes", changedLineCount),
+								inlineClassName: 'search-editor-file-modified',
+							},
+						},
+					});
 				}
-				const previousSourceReferences = session.sourceReferences;
-				const previousPreviewModels = session.previewModels;
-				session.synchronizer.setDiffModels(diffModels.synchronizedPreviewModels);
-				session.sourceReferences = diffModels.sourceReferences;
-				session.previewModels = diffModels.previewModels;
-				previousPreviewModels.dispose();
-				previousSourceReferences.dispose();
-				this.searchEditorResultLogService.info(`Refreshed Search Editor result diff (changedFiles=${session.synchronizer.resources.value.length})`);
-			} catch (error) {
-				diffModels?.previewModels.dispose();
-				diffModels?.sourceReferences.dispose();
-				this.searchEditorResultLogService.error('Failed to refresh Search Editor result diff', error);
-				this.logService.warn('SearchEditor: Failed to refresh Search Editor result diff', error);
 			}
-		}));
+			return { mappedFileCount: linesByResource.size, changedFileCount, decorations, sourceSession };
+		} catch (error) {
+			sourceSession.dispose();
+			throw error;
+		}
 	}
 
 	private updateUnappliedChangesStatus(count: number): void {
@@ -540,7 +755,7 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 	}
 
 	updateResultsDiffAction(): void {
-		this.updateOpenResultsDiffAction();
+		this.updateResultChangesActions();
 	}
 
 	private resolveResultSources(input: SearchEditorInput, text: string): SearchResultSource[] {
@@ -641,7 +856,7 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 		this._register(this.searchResultEditor.onDidChangeModelContent(() => {
 			if (!this.updatingModelForSearch) {
 				this.getInput()?.setDirty(true);
-				this.updateOpenResultsDiffAction();
+				this.updateResultChangesActions();
 			}
 		}));
 	}
@@ -652,6 +867,7 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 
 	override focus() {
 		super.focus();
+		this.updateResultChangesActions();
 
 		const viewState = this.loadEditorViewState(this.getInput());
 		if (viewState && viewState.focused === 'editor') {
@@ -793,6 +1009,116 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 			() => endingCursorLines.filter(isDefined).map(line => new Selection(line, 1, line, 1)));
 	}
 
+	insertSourceLine(above: boolean): void {
+		const model = this.searchResultEditor.getModel();
+		const input = this.getInput();
+		const position = this.searchResultEditor.getPosition();
+		if (!model || !input || !position) {
+			return;
+		}
+		const sources = this.resolveResultSources(input, model.getValue());
+		const resultLine = parseSearchResultLines(model.getValue(), sources).find(line => line.resultLineNumber === position.lineNumber);
+		if (!resultLine) {
+			return;
+		}
+		const anchorLineNumber = getSearchResultInsertAnchorLineNumber(resultLine, above);
+		const indentation = model.getLineContent(position.lineNumber).match(/^\s*/)?.[0] ?? '  ';
+		const text = `${indentation}${anchorLineNumber}+: `;
+		const insertLineNumber = above ? position.lineNumber : position.lineNumber + 1;
+		const range = above
+			? new Range(position.lineNumber, 1, position.lineNumber, 1)
+			: new Range(position.lineNumber, model.getLineMaxColumn(position.lineNumber), position.lineNumber, model.getLineMaxColumn(position.lineNumber));
+		const editText = above ? `${text}${model.getEOL()}` : `${model.getEOL()}${text}`;
+		model.pushEditOperations(this.searchResultEditor.getSelections(), [{ range, text: editText }], () => [new Selection(insertLineNumber, text.length + 1, insertLineNumber, text.length + 1)]);
+		this.searchResultEditor.revealLineInCenterIfOutsideViewport(insertLineNumber);
+		this.searchResultEditor.focus();
+	}
+
+	enterSourceLine(): void {
+		const model = this.searchResultEditor.getModel();
+		const input = this.getInput();
+		const selection = this.searchResultEditor.getSelection();
+		if (!model || !input || !selection) {
+			return;
+		}
+		const sources = this.resolveResultSources(input, model.getValue());
+		const resultLine = parseSearchResultLines(model.getValue(), sources).find(line => line.resultLineNumber === selection.positionLineNumber);
+		if (!selection.isEmpty() || !resultLine || resultLine.kind === 'delete') {
+			this.insertSourceLine(false);
+			return;
+		}
+
+		const splitOffset = Math.max(0, selection.positionColumn - resultLine.resultStartColumn);
+		const currentText = resultLine.text.slice(0, splitOffset);
+		const insertedText = resultLine.text.slice(splitOffset);
+		const anchorLineNumber = getSearchResultInsertAnchorLineNumber(resultLine, false);
+		const indentation = model.getLineContent(resultLine.resultLineNumber).match(/^\s*/)?.[0] ?? '  ';
+		const insertedPrefix = `${indentation}${anchorLineNumber}+: `;
+		model.pushEditOperations(
+			this.searchResultEditor.getSelections(),
+			[{
+				range: new Range(resultLine.resultLineNumber, resultLine.resultStartColumn, resultLine.resultLineNumber, model.getLineMaxColumn(resultLine.resultLineNumber)),
+				text: `${currentText}${model.getEOL()}${insertedPrefix}${insertedText}`,
+			}],
+			() => [new Selection(resultLine.resultLineNumber + 1, insertedPrefix.length + 1, resultLine.resultLineNumber + 1, insertedPrefix.length + 1)],
+		);
+		this.searchResultEditor.revealLineInCenterIfOutsideViewport(resultLine.resultLineNumber + 1);
+		this.searchResultEditor.focus();
+	}
+
+	deleteSourceLine(): void {
+		const model = this.searchResultEditor.getModel();
+		const input = this.getInput();
+		const position = this.searchResultEditor.getPosition();
+		if (!model || !input || !position) {
+			return;
+		}
+		const sources = this.resolveResultSources(input, model.getValue());
+		const resultLine = parseSearchResultLines(model.getValue(), sources).find(line => line.resultLineNumber === position.lineNumber);
+		if (!resultLine || resultLine.kind !== 'replace') {
+			return;
+		}
+		const operationColumn = resultLine.resultStartColumn - 2;
+		model.pushEditOperations(
+			this.searchResultEditor.getSelections(),
+			[{ range: new Range(position.lineNumber, operationColumn, position.lineNumber, operationColumn), text: '-' }],
+			() => [new Selection(position.lineNumber, position.column + 1, position.lineNumber, position.column + 1)],
+		);
+		this.searchResultEditor.focus();
+	}
+
+	backspaceSourceLine(): void {
+		const model = this.searchResultEditor.getModel();
+		const input = this.getInput();
+		const selection = this.searchResultEditor.getSelection();
+		if (!model || !input || !selection) {
+			return;
+		}
+		const sources = this.resolveResultSources(input, model.getValue());
+		const resultLine = parseSearchResultLines(model.getValue(), sources).find(line => line.resultLineNumber === selection.startLineNumber);
+		const selectsWholeLine = resultLine?.kind === 'replace'
+			&& selection.startColumn <= model.getLineFirstNonWhitespaceColumn(selection.startLineNumber)
+			&& (selection.endLineNumber === selection.startLineNumber
+				? selection.endColumn === model.getLineMaxColumn(selection.startLineNumber)
+				: selection.endLineNumber === selection.startLineNumber + 1 && selection.endColumn === 1);
+		const deletesEmptyLine = resultLine?.kind === 'replace'
+			&& resultLine.text.length === 0
+			&& selection.isEmpty()
+			&& selection.positionColumn <= resultLine.resultStartColumn;
+		if (!resultLine || (!selectsWholeLine && !deletesEmptyLine)) {
+			void this.commandService.executeCommand('deleteLeft');
+			return;
+		}
+
+		const operationColumn = resultLine.resultStartColumn - 2;
+		model.pushEditOperations(
+			this.searchResultEditor.getSelections(),
+			[{ range: new Range(resultLine.resultLineNumber, operationColumn, resultLine.resultLineNumber, operationColumn), text: '-' }],
+			() => [new Selection(resultLine.resultLineNumber, resultLine.resultStartColumn + 1, resultLine.resultLineNumber, resultLine.resultStartColumn + 1)],
+		);
+		this.searchResultEditor.focus();
+	}
+
 	cleanState() {
 		this.getInput()?.setDirty(false);
 	}
@@ -868,6 +1194,7 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 				if (!await this.confirmSearchWithUnappliedChanges()) {
 					return;
 				}
+				this.hideResultsInlineDiff();
 				this.toggleRunAgainMessage(false);
 				await this.doRunSearch();
 				if (options.resetCursor) {
@@ -1025,11 +1352,11 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 		const results = await serializeSearchResultForEditor(this.searchModel.searchResult, startConfig.filesToInclude, startConfig.filesToExclude, startConfig.contextLines, labelFormatter, sortOrder, searchOperation?.limitHit);
 		const { resultsModel } = await input.resolveModels();
 		input.setResultSources(results.sources);
+		await this.captureResultBaseline(input, results.sources);
 		this.updatingModelForSearch = true;
 		this.modelService.updateModel(resultsModel, results.text);
 		this.updatingModelForSearch = false;
-		await this.refreshResultsDiffs(input, resultsModel);
-		this.updateOpenResultsDiffAction();
+		this.updateResultChangesActions();
 
 		if (searchOperation && searchOperation.messages) {
 			for (const message of searchOperation.messages) {
@@ -1076,7 +1403,8 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 			const configuredOffset = Number.parseFloat(DOM.getWindow(this.queryEditorContainer).getComputedStyle(this.queryEditorContainer).getPropertyValue('--search-editor-query-layout-offset'));
 			const queryEditorWidth = this.dimension.width - (Number.isFinite(configuredOffset) ? configuredOffset : DEFAULT_QUERY_EDITOR_LAYOUT_OFFSET);
 			this.queryEditorWidget.setWidth(queryEditorWidth);
-			this.searchResultEditor.layout({ height: this.dimension.height - DOM.getTotalHeight(this.queryEditorContainer), width: this.dimension.width });
+			const resultsDimension = { height: this.dimension.height - DOM.getTotalHeight(this.queryEditorContainer), width: this.dimension.width };
+			this.searchResultEditor.layout(resultsDimension);
 			this.inputPatternExcludes.setWidth(queryEditorWidth);
 			this.inputPatternIncludes.setWidth(queryEditorWidth);
 		}
@@ -1102,6 +1430,7 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 	}
 
 	override async setInput(newInput: SearchEditorInput, options: IEditorOptions | undefined, context: IEditorOpenContext, token: CancellationToken): Promise<void> {
+		this.hideResultsInlineDiff();
 		await super.setInput(newInput, options, context, token);
 		if (token.isCancellationRequested) {
 			return;
@@ -1111,8 +1440,14 @@ export class SearchEditor extends AbstractTextCodeEditor<SearchEditorViewState> 
 		if (token.isCancellationRequested) { return; }
 
 		this.searchResultEditor.setModel(resultsModel);
+		if (!newInput.hasResultBaseline()) {
+			const resultSources = this.resolveResultSources(newInput, resultsModel.getValue());
+			newInput.setResultSources(resultSources);
+			await this.captureResultBaseline(newInput, resultSources);
+			if (token.isCancellationRequested) { return; }
+		}
 		this.updateUnappliedChangesStatus(newInput.getUnappliedChangesCount());
-		this.updateOpenResultsDiffAction();
+		this.updateResultChangesActions();
 		this.pauseSearching = true;
 
 		this.toggleRunAgainMessage(!newInput.ongoingSearchOperation && resultsModel.getLineCount() === 1 && resultsModel.getValueLength() === 0 && configurationModel.config.query !== '');

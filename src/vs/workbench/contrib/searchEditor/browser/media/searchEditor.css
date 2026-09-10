@@ -12,6 +12,69 @@
 	flex: 1;
 }
 
+.search-editor .search-editor-inline-diff-apply {
+	cursor: pointer;
+	color: var(--vscode-testing-iconPassed);
+}
+
+.search-editor .search-editor-result-modified {
+	border-left: var(--vscode-strokeThickness) solid var(--vscode-editorOverviewRuler-modifiedForeground);
+}
+
+.search-editor .search-editor-file-modified {
+	border: 0;
+	color: var(--vscode-gitDecoration-modifiedResourceForeground);
+	font-style: italic;
+}
+
+.search-editor .search-editor-inline-diff-preview {
+	display: grid;
+	grid-template-rows: repeat(2, minmax(0, 1fr));
+	box-sizing: border-box;
+	color: var(--vscode-editor-foreground);
+	font-family: var(--monaco-monospace-font);
+}
+
+.search-editor .search-editor-inline-diff-preview-row {
+	display: flex;
+	align-items: center;
+	min-width: 0;
+	gap: var(--vscode-spacing-size60);
+	padding: 0 var(--vscode-spacing-size80);
+}
+
+.search-editor .search-editor-inline-diff-preview-row.removed {
+	background-color: var(--vscode-diffEditor-removedLineBackground, var(--vscode-diffEditor-removedTextBackground));
+}
+
+.search-editor .search-editor-inline-diff-preview-row.inserted {
+	background-color: var(--vscode-diffEditor-insertedLineBackground, var(--vscode-diffEditor-insertedTextBackground));
+}
+
+.search-editor .search-editor-inline-diff-preview-label {
+	flex: 0 0 auto;
+	padding-right: var(--vscode-spacing-size60);
+	border-right: var(--vscode-strokeThickness) solid var(--vscode-editorWidget-border);
+	color: var(--vscode-descriptionForeground);
+	font-size: var(--vscode-fontSize-label2);
+}
+
+.search-editor .search-editor-inline-diff-preview-text {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: pre;
+}
+
+.search-editor .search-editor-inline-diff-preview-change.removed {
+	background-color: var(--vscode-diffEditor-removedTextBackground);
+	text-decoration: line-through;
+}
+
+.search-editor .search-editor-inline-diff-preview-change.inserted {
+	background-color: var(--vscode-diffEditor-insertedTextBackground);
+}
+
 .search-editor .query-container {
 	--search-editor-query-layout-offset: 28px;
 	margin: 0px 12px 12px 19px;

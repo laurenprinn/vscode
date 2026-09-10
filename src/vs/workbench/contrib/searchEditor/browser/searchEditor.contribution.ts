@@ -5,15 +5,15 @@
 
 import { Codicon } from '../../../../base/common/codicons.js';
 import { KeyCode, KeyMod } from '../../../../base/common/keyCodes.js';
-import { Disposable, DisposableStore } from '../../../../base/common/lifecycle.js';
+import { Disposable } from '../../../../base/common/lifecycle.js';
 import { extname, isEqual } from '../../../../base/common/resources.js';
 import { URI } from '../../../../base/common/uri.js';
 import { ServicesAccessor } from '../../../../editor/browser/editorExtensions.js';
 import { IBulkEditService, ResourceTextEdit } from '../../../../editor/browser/services/bulkEditService.js';
-import { DiffEditorSelectionHunkToolbarContext } from '../../../../editor/browser/widget/diffEditor/features/gutterFeature.js';
 import { Range } from '../../../../editor/common/core/range.js';
 import { ITextModelService } from '../../../../editor/common/services/resolverService.js';
 import { ToggleCaseSensitiveKeybinding, ToggleRegexKeybinding, ToggleWholeWordKeybinding } from '../../../../editor/contrib/find/browser/findModel.js';
+import { EditorContextKeys } from '../../../../editor/common/editorContextKeys.js';
 import { localize, localize2 } from '../../../../nls.js';
 import { Action2, MenuId, registerAction2 } from '../../../../platform/actions/common/actions.js';
 import { CommandsRegistry } from '../../../../platform/commands/common/commands.js';
@@ -27,7 +27,7 @@ import { Registry } from '../../../../platform/registry/common/platform.js';
 import { EditorPaneDescriptor, IEditorPaneRegistry } from '../../../browser/editor.js';
 import { IWorkbenchContribution, WorkbenchPhase, registerWorkbenchContribution2 } from '../../../common/contributions.js';
 import { IEditorSerializer, IEditorFactoryRegistry, EditorExtensions, DEFAULT_EDITOR_ASSOCIATION } from '../../../common/editor.js';
-import { ActiveEditorContext, ResourceContextKey } from '../../../common/contextkeys.js';
+import { ActiveEditorContext } from '../../../common/contextkeys.js';
 import { IViewsService } from '../../../services/views/common/viewsService.js';
 import { getSearchView } from '../../search/browser/searchActionsBase.js';
 import { searchNewEditorIcon, searchRefreshIcon } from '../../search/browser/searchIcons.js';
@@ -47,10 +47,6 @@ import { EditorInput } from '../../../common/editor/editorInput.js';
 import { getActiveElement } from '../../../../base/browser/dom.js';
 import * as nls from '../../../../nls.js';
 import { Extensions as ConfigurationExtensions, IConfigurationRegistry } from '../../../../platform/configuration/common/configurationRegistry.js';
-import { MultiDiffEditor } from '../../multiDiffEditor/browser/multiDiffEditor.js';
-import { MultiDiffEditorInput } from '../../multiDiffEditor/browser/multiDiffEditorInput.js';
-import { MultiDiffEditorItem } from '../../multiDiffEditor/browser/multiDiffSourceResolverService.js';
-import { SearchEditorDiffContentProvider, SearchEditorDiffScheme } from './searchEditorDiffModel.js';
 import { ISearchEditorResultLogService, SearchEditorResultLogService } from './searchEditorResultLogService.js';
 
 registerSingleton(ISearchEditorResultLogService, SearchEditorResultLogService, InstantiationType.Delayed);
@@ -71,15 +67,10 @@ const RerunSearchEditorSearchCommandId = 'rerunSearchEditorSearch';
 const CleanSearchEditorStateCommandId = 'cleanSearchEditorState';
 const SelectAllSearchEditorMatchesCommandId = 'selectAllSearchEditorMatches';
 
-const inSearchEditorDiff = ContextKeyExpr.and(
-	ActiveEditorContext.isEqualTo(MultiDiffEditor.ID),
-	ResourceContextKey.Scheme.isEqualTo(SearchEditorDiffScheme),
+const inSearchEditorInlineDiff = ContextKeyExpr.and(
+	SearchEditorConstants.InSearchEditor,
+	SearchEditorConstants.SearchEditorInlineDiffVisible,
 );
-
-function getActiveSearchEditorDiffInput(editorService: IEditorService): MultiDiffEditorInput | undefined {
-	const input = editorService.activeEditor;
-	return input instanceof MultiDiffEditorInput && input.resource?.scheme === SearchEditorDiffScheme ? input : undefined;
-}
 
 function updateVisibleSearchEditors(editorService: IEditorService): void {
 	for (const pane of editorService.visibleEditorPanes) {
@@ -89,67 +80,7 @@ function updateVisibleSearchEditors(editorService: IEditorService): void {
 	}
 }
 
-async function applySearchEditorDiffItems(accessor: ServicesAccessor, items: readonly MultiDiffEditorItem[], label: string): Promise<void> {
-	const textModelService = accessor.get(ITextModelService);
-	const bulkEditService = accessor.get(IBulkEditService);
-	const editorService = accessor.get(IEditorService);
-	const textFileService = accessor.get(ITextFileService);
-	const notificationService = accessor.get(INotificationService);
-	const logService = accessor.get(ISearchEditorResultLogService);
-	const references = new DisposableStore();
-	try {
-		logService.info(`Applying Search Editor result changes (requestedFiles=${items.length})`);
-		const edits: ResourceTextEdit[] = [];
-		const editedResources: URI[] = [];
-		for (const item of items) {
-			if (!item.originalUri || !item.modifiedUri || item.modifiedUri.scheme !== SearchEditorDiffScheme) {
-				continue;
-			}
-
-			const originalReference = references.add(await textModelService.createModelReference(item.originalUri));
-			const modifiedReference = references.add(await textModelService.createModelReference(item.modifiedUri));
-			const originalModel = originalReference.object.textEditorModel;
-			const modifiedModel = modifiedReference.object.textEditorModel;
-			if (originalModel.getValue() !== modifiedModel.getValue()) {
-				editedResources.push(item.originalUri);
-				edits.push(new ResourceTextEdit(
-					item.originalUri,
-					{ range: originalModel.getFullModelRange(), text: modifiedModel.getValue() },
-					originalModel.getVersionId(),
-				));
-			}
-		}
-
-		if (edits.length > 0) {
-			const result = await bulkEditService.apply(edits, {
-				label,
-				code: 'undoredo.searchEditor.applyChanges',
-			});
-			if (result.isApplied) {
-				await Promise.all(editedResources.map(resource => textFileService.save(resource)));
-				logService.info(`Applied Search Editor result changes (files=${edits.length})`);
-				notificationService.info(edits.length === 1
-					? localize('searchEditor.resultChangesAppliedSingle', "Changes applied to 1 file.")
-					: localize('searchEditor.resultChangesAppliedMultiple', "Changes applied to {0} files.", edits.length));
-				for (const resource of editedResources) {
-					logService.info(`Applied changes to ${resource.toString()}`);
-				}
-				updateVisibleSearchEditors(editorService);
-			} else {
-				logService.warn(`Search Editor result changes were not applied (files=${edits.length})`);
-			}
-		} else {
-			logService.info('Apply skipped: selected Search Editor results match source files');
-		}
-	} catch (error) {
-		logService.error('Failed to apply Search Editor result changes', error);
-		throw error;
-	} finally {
-		references.dispose();
-	}
-}
-
-async function applySearchEditorDiffText(accessor: ServicesAccessor, resource: URI, text: string, label: string): Promise<void> {
+async function applySearchEditorDiffText(accessor: ServicesAccessor, resource: URI, text: string, label: string): Promise<boolean> {
 	const textModelService = accessor.get(ITextModelService);
 	const bulkEditService = accessor.get(IBulkEditService);
 	const editorService = accessor.get(IEditorService);
@@ -161,7 +92,7 @@ async function applySearchEditorDiffText(accessor: ServicesAccessor, resource: U
 		const model = reference.object.textEditorModel;
 		if (model.getValue() === text) {
 			logService.info(`Apply skipped: Search Editor result matches source file (${resource.toString()})`);
-			return;
+			return true;
 		}
 		logService.info(`Applying Search Editor result change (${resource.toString()})`);
 		const result = await bulkEditService.apply([
@@ -175,8 +106,10 @@ async function applySearchEditorDiffText(accessor: ServicesAccessor, resource: U
 			logService.info(`Applied Search Editor result change (${resource.toString()})`);
 			notificationService.info(localize('searchEditor.resultChangesAppliedSingle', "Changes applied to 1 file."));
 			updateVisibleSearchEditors(editorService);
+			return true;
 		} else {
 			logService.warn(`Search Editor result change was not applied (${resource.toString()})`);
+			return false;
 		}
 	} catch (error) {
 		logService.error(`Failed to apply Search Editor result change (${resource.toString()})`, error);
@@ -184,6 +117,40 @@ async function applySearchEditorDiffText(accessor: ServicesAccessor, resource: U
 	} finally {
 		reference.dispose();
 	}
+}
+
+async function applyAllSearchEditorResultChanges(
+	changes: readonly { resource: URI; range: Range; text: string; versionId: number }[],
+	label: string,
+	bulkEditService: IBulkEditService,
+	editorService: IEditorService,
+	textFileService: ITextFileService,
+	notificationService: INotificationService,
+	logService: ISearchEditorResultLogService,
+): Promise<boolean> {
+	if (changes.length === 0) {
+		logService.info('Apply all skipped: Search Editor results match source files');
+		return true;
+	}
+
+	logService.info(`Applying all Search Editor result changes (files=${changes.length})`);
+	const result = await bulkEditService.apply(changes.map(change => new ResourceTextEdit(
+		change.resource,
+		{ range: change.range, text: change.text },
+		change.versionId,
+	)), {
+		label,
+		code: 'undoredo.searchEditor.applyChanges',
+	});
+	if (result.isApplied) {
+		await Promise.all(changes.map(change => textFileService.save(change.resource)));
+		notificationService.info(changes.length === 1
+			? localize('searchEditor.resultChangesAppliedSingle', "Changes applied to 1 file.")
+			: localize('searchEditor.resultChangesAppliedMultiple', "Changes applied to {0} files.", changes.length));
+		updateVisibleSearchEditors(editorService);
+		return true;
+	}
+	return false;
 }
 
 
@@ -432,6 +399,28 @@ registerAction2(class extends Action2 {
 registerAction2(class extends Action2 {
 	constructor() {
 		super({
+			id: SearchEditorConstants.BackspaceSearchEditorSourceLineCommandId,
+			title: localize2('searchEditor.backspaceSourceLine', 'Backspace Search Result Line'),
+			precondition: SearchEditorConstants.InSearchEditor,
+			keybinding: {
+				weight: KeybindingWeight.EditorContrib,
+				primary: KeyCode.Backspace,
+				when: ContextKeyExpr.and(SearchEditorConstants.InSearchEditor, EditorContextKeys.editorTextFocus),
+			},
+		});
+	}
+
+	run(accessor: ServicesAccessor): void {
+		const editorPane = accessor.get(IEditorService).activeEditorPane;
+		if (editorPane instanceof SearchEditor) {
+			editorPane.backspaceSourceLine();
+		}
+	}
+});
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
 			id: SearchEditorConstants.OpenNewEditorCommandId,
 			title: localize2('search.openNewSearchEditor', 'New Search Editor'),
 			category,
@@ -441,6 +430,94 @@ registerAction2(class extends Action2 {
 	}
 	async run(accessor: ServicesAccessor, args: LegacySearchEditorArgs | OpenSearchEditorArgs) {
 		await accessor.get(IInstantiationService).invokeFunction(openNewSearchEditor, translateLegacyConfig({ location: 'new', ...args }));
+	}
+});
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: SearchEditorConstants.InsertSearchEditorSourceLineAboveCommandId,
+			title: localize2('searchEditor.insertSourceLineAbove', 'Insert Source Line Above'),
+			category,
+			f1: true,
+			precondition: SearchEditorConstants.InSearchEditor,
+			menu: { id: MenuId.EditorContext, when: SearchEditorConstants.InSearchEditor, group: '1_modification' },
+		});
+	}
+
+	run(accessor: ServicesAccessor): void {
+		const editorPane = accessor.get(IEditorService).activeEditorPane;
+		if (editorPane instanceof SearchEditor) {
+			editorPane.insertSourceLine(true);
+		}
+	}
+});
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: SearchEditorConstants.InsertSearchEditorSourceLineBelowCommandId,
+			title: localize2('searchEditor.insertSourceLineBelow', 'Insert Source Line Below'),
+			category,
+			f1: true,
+			precondition: SearchEditorConstants.InSearchEditor,
+			menu: { id: MenuId.EditorContext, when: SearchEditorConstants.InSearchEditor, group: '1_modification' },
+		});
+	}
+
+	run(accessor: ServicesAccessor): void {
+		const editorPane = accessor.get(IEditorService).activeEditorPane;
+		if (editorPane instanceof SearchEditor) {
+			editorPane.insertSourceLine(false);
+		}
+	}
+});
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: SearchEditorConstants.EnterSearchEditorSourceLineCommandId,
+			title: localize2('searchEditor.enterSourceLine', 'Insert Search Result Line Break'),
+			precondition: SearchEditorConstants.InSearchEditor,
+			keybinding: {
+				weight: KeybindingWeight.EditorContrib,
+				primary: KeyCode.Enter,
+				when: ContextKeyExpr.and(SearchEditorConstants.InSearchEditor, EditorContextKeys.editorTextFocus),
+			},
+		});
+	}
+
+	run(accessor: ServicesAccessor): void {
+		const editorPane = accessor.get(IEditorService).activeEditorPane;
+		if (editorPane instanceof SearchEditor) {
+			editorPane.enterSourceLine();
+		}
+	}
+});
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: SearchEditorConstants.DeleteSearchEditorSourceLineCommandId,
+			title: localize2('searchEditor.deleteSourceLine', 'Delete Source Line'),
+			category,
+			f1: true,
+			precondition: SearchEditorConstants.InSearchEditor,
+			keybinding: {
+				weight: KeybindingWeight.EditorContrib,
+				primary: KeyCode.Delete,
+				secondary: [KeyMod.CtrlCmd | KeyMod.Shift | KeyCode.KeyK],
+				when: ContextKeyExpr.and(SearchEditorConstants.InSearchEditor, EditorContextKeys.editorTextFocus),
+			},
+			menu: { id: MenuId.EditorContext, when: SearchEditorConstants.InSearchEditor, group: '1_modification' },
+		});
+	}
+
+	run(accessor: ServicesAccessor): void {
+		const editorPane = accessor.get(IEditorService).activeEditorPane;
+		if (editorPane instanceof SearchEditor) {
+			editorPane.deleteSourceLine();
+		}
 	}
 });
 
@@ -536,8 +613,123 @@ registerAction2(class extends Action2 {
 registerAction2(class extends Action2 {
 	constructor() {
 		super({
-			id: SearchEditorConstants.OpenSearchEditorResultsDiffCommandId,
-			title: localize2('searchEditor.openResultsDiff', 'Open Search Result Changes'),
+			id: SearchEditorConstants.OpenSearchEditorResultsInlineDiffCommandId,
+			title: localize2('searchEditor.openResultsInlineDiff', 'View Inline Changes'),
+			category,
+			f1: true,
+			precondition: SearchEditorConstants.InSearchEditor,
+			keybinding: {
+				primary: KeyMod.CtrlCmd | KeyCode.KeyD,
+				mac: { primary: KeyMod.WinCtrl | KeyCode.KeyD },
+				when: SearchEditorConstants.InSearchEditor,
+				weight: KeybindingWeight.EditorContrib,
+			},
+		});
+	}
+
+	run(accessor: ServicesAccessor): Promise<void> | undefined {
+		const editorService = accessor.get(IEditorService);
+		if (editorService.activeEditor instanceof SearchEditorInput) {
+			return (editorService.activeEditorPane as SearchEditor).toggleResultsInlineDiff();
+		}
+		return undefined;
+	}
+});
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: SearchEditorConstants.ApplySearchEditorInlineResultChangeCommandId,
+			title: localize2('searchEditor.applyInlineResultChange', 'Apply Search Result to Source File'),
+			category,
+			f1: true,
+			precondition: inSearchEditorInlineDiff,
+			menu: {
+				id: MenuId.EditorContext,
+				when: inSearchEditorInlineDiff,
+				group: '1_modification',
+			},
+		});
+	}
+
+	async run(accessor: ServicesAccessor, lineNumber?: number): Promise<void> {
+		const editorService = accessor.get(IEditorService);
+		const editorPane = editorService.activeEditorPane;
+		if (!(editorPane instanceof SearchEditor)) {
+			return;
+		}
+		const change = editorPane.getInlineResultChange(lineNumber);
+		if (!change) {
+			return;
+		}
+		const applied = await applySearchEditorDiffText(
+			accessor,
+			change.resource,
+			change.text,
+			localize('searchEditor.applyInlineResultChange.label', "Apply Search Result Change"),
+		);
+		if (applied) {
+			await editorPane.rebaseAppliedResultChanges([change.resource]);
+		}
+	}
+});
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: SearchEditorConstants.PreviousSearchEditorInlineResultChangeCommandId,
+			title: localize2('searchEditor.previousInlineResultChange', 'Previous Inline Change'),
+			icon: Codicon.arrowUp,
+			category,
+			f1: true,
+			precondition: inSearchEditorInlineDiff,
+			keybinding: {
+				primary: KeyMod.Shift | KeyCode.F7,
+				when: inSearchEditorInlineDiff,
+				weight: KeybindingWeight.EditorContrib,
+			},
+		});
+	}
+
+	run(accessor: ServicesAccessor): void {
+		const editorPane = accessor.get(IEditorService).activeEditorPane;
+		if (editorPane instanceof SearchEditor) {
+			editorPane.goToPreviousInlineResultChange();
+		}
+	}
+});
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: SearchEditorConstants.NextSearchEditorInlineResultChangeCommandId,
+			title: localize2('searchEditor.nextInlineResultChange', 'Next Inline Change'),
+			icon: Codicon.arrowDown,
+			category,
+			f1: true,
+			precondition: inSearchEditorInlineDiff,
+			keybinding: {
+				primary: KeyCode.F7,
+				when: inSearchEditorInlineDiff,
+				weight: KeybindingWeight.EditorContrib,
+			},
+		});
+	}
+
+	run(accessor: ServicesAccessor): void {
+		const editorPane = accessor.get(IEditorService).activeEditorPane;
+		if (editorPane instanceof SearchEditor) {
+			editorPane.goToNextInlineResultChange();
+		}
+	}
+});
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: SearchEditorConstants.ApplyAllSearchEditorResultChangesCommandId,
+			title: localize2('searchEditor.applyAllResultChanges', 'Apply All Changes'),
+			icon: Codicon.checkAll,
 			category,
 			f1: true,
 			precondition: SearchEditorConstants.InSearchEditor,
@@ -550,101 +742,28 @@ registerAction2(class extends Action2 {
 		});
 	}
 
-	run(accessor: ServicesAccessor): Promise<void> | undefined {
+	async run(accessor: ServicesAccessor): Promise<void> {
+		const bulkEditService = accessor.get(IBulkEditService);
 		const editorService = accessor.get(IEditorService);
-		if (editorService.activeEditor instanceof SearchEditorInput) {
-			return (editorService.activeEditorPane as SearchEditor).openResultsDiff();
+		const textFileService = accessor.get(ITextFileService);
+		const notificationService = accessor.get(INotificationService);
+		const logService = accessor.get(ISearchEditorResultLogService);
+		const editorPane = editorService.activeEditorPane;
+		if (editorPane instanceof SearchEditor) {
+			const changes = await editorPane.getAllResultChanges();
+			const applied = await applyAllSearchEditorResultChanges(
+				changes,
+				localize('searchEditor.applyAllResultChanges.label', "Apply All Search Result Changes"),
+				bulkEditService,
+				editorService,
+				textFileService,
+				notificationService,
+				logService,
+			);
+			if (applied) {
+				await editorPane.rebaseAppliedResultChanges(changes.map(change => change.resource));
+			}
 		}
-		return undefined;
-	}
-});
-
-registerAction2(class extends Action2 {
-	constructor() {
-		super({
-			id: 'searchEditor.applyResultChange',
-			title: localize2('searchEditor.applyResultChange', 'Apply Change'),
-			icon: Codicon.arrowLeft,
-			f1: false,
-			precondition: inSearchEditorDiff,
-			menu: [MenuId.DiffEditorHunkToolbar, MenuId.DiffEditorSelectionToolbar].map(id => ({
-				id,
-				when: inSearchEditorDiff,
-				group: 'primary',
-				order: 1,
-			})),
-		});
-	}
-
-	run(accessor: ServicesAccessor, ...args: unknown[]): Promise<void> | undefined {
-		const context = args[0] as DiffEditorSelectionHunkToolbarContext | undefined;
-		if (!context || context.modifiedUri.scheme !== SearchEditorDiffScheme) {
-			return undefined;
-		}
-		return applySearchEditorDiffText(
-			accessor,
-			context.originalUri,
-			context.originalWithModifiedChanges,
-			localize('searchEditor.applyResultChange.label', "Apply Search Result Change"),
-		);
-	}
-});
-
-registerAction2(class extends Action2 {
-	constructor() {
-		super({
-			id: 'searchEditor.applyFileResultChanges',
-			title: localize2('searchEditor.applyFileResultChanges', 'Apply File Changes'),
-			icon: Codicon.check,
-			f1: false,
-			precondition: inSearchEditorDiff,
-			menu: {
-				id: MenuId.MultiDiffEditorFileToolbar,
-				when: inSearchEditorDiff,
-				group: 'navigation',
-				order: 1,
-			},
-		});
-	}
-
-	run(accessor: ServicesAccessor, ...args: unknown[]): Promise<void> | undefined {
-		const resource = args[0];
-		if (!(resource instanceof URI)) {
-			return undefined;
-		}
-		const input = getActiveSearchEditorDiffInput(accessor.get(IEditorService));
-		const item = input?.resources.get()?.find(item => item.modifiedUri && isEqual(item.modifiedUri, resource));
-		if (!item) {
-			return undefined;
-		}
-		return applySearchEditorDiffItems(accessor, [item], localize('searchEditor.applyFileResultChanges.label', "Apply Search Result File Changes"));
-	}
-});
-
-registerAction2(class extends Action2 {
-	constructor() {
-		super({
-			id: 'searchEditor.applyAllResultChanges',
-			title: localize2('searchEditor.applyAllResultChanges', 'Apply All Changes'),
-			icon: Codicon.checkAll,
-			f1: false,
-			precondition: inSearchEditorDiff,
-			menu: [MenuId.EditorTitle, MenuId.CompactWindowEditorTitle].map(id => ({
-				id,
-				when: inSearchEditorDiff,
-				group: 'navigation',
-				order: 0,
-			})),
-		});
-	}
-
-	run(accessor: ServicesAccessor): Promise<void> | undefined {
-		const input = getActiveSearchEditorDiffInput(accessor.get(IEditorService));
-		const items = input?.resources.get();
-		if (!items) {
-			return undefined;
-		}
-		return applySearchEditorDiffItems(accessor, items, localize('searchEditor.applyAllResultChanges.label', "Apply All Search Result Changes"));
 	}
 });
 
@@ -895,5 +1014,4 @@ class SearchEditorWorkingCopyEditorHandler extends Disposable implements IWorkbe
 }
 
 registerWorkbenchContribution2(SearchEditorWorkingCopyEditorHandler.ID, SearchEditorWorkingCopyEditorHandler, WorkbenchPhase.BlockRestore);
-registerWorkbenchContribution2(SearchEditorDiffContentProvider.ID, SearchEditorDiffContentProvider, WorkbenchPhase.BlockStartup);
 //#endregion

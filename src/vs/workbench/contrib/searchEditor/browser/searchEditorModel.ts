@@ -19,6 +19,11 @@ import { SEARCH_RESULT_LANGUAGE_ID } from '../../../services/search/common/searc
 
 export type SearchEditorData = { resultsModel: ITextModel; configurationModel: SearchConfigurationModel };
 
+type SearchEditorModelEntry = {
+	resolve: () => Promise<SearchEditorData>;
+	resultBaseline?: ResourceMap<readonly string[]>;
+};
+
 export class SearchConfigurationModel {
 	private _onConfigDidUpdate = new Emitter<SearchConfiguration>();
 	public readonly onConfigDidUpdate = this._onConfigDidUpdate.event;
@@ -35,10 +40,27 @@ export class SearchEditorModel {
 	async resolve(): Promise<SearchEditorData> {
 		return assertReturnsDefined(searchEditorModelFactory.models.get(this.resource)).resolve();
 	}
+
+	setResultBaseline(entries: readonly { resource: URI; lines: readonly string[] }[]): void {
+		assertReturnsDefined(searchEditorModelFactory.models.get(this.resource)).resultBaseline = new ResourceMap(entries.map((entry): [URI, readonly string[]] => [entry.resource, entry.lines]));
+	}
+
+	hasResultBaseline(): boolean {
+		return searchEditorModelFactory.models.get(this.resource)?.resultBaseline !== undefined;
+	}
+
+	getResultBaseline(resource: URI): readonly string[] | undefined {
+		return searchEditorModelFactory.models.get(this.resource)?.resultBaseline?.get(resource);
+	}
+
+	getResultBaselineEntries(): { resource: URI; lines: readonly string[] }[] {
+		const resultBaseline = searchEditorModelFactory.models.get(this.resource)?.resultBaseline;
+		return resultBaseline ? [...resultBaseline].map(([resource, lines]) => ({ resource, lines })) : [];
+	}
 }
 
 class SearchEditorModelFactory {
-	models = new ResourceMap<{ resolve: () => Promise<SearchEditorData> }>();
+	models = new ResourceMap<SearchEditorModelEntry>();
 
 	constructor() { }
 

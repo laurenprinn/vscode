@@ -257,6 +257,22 @@ export class SearchEditorInput extends EditorInput {
 		return this.resultSources;
 	}
 
+	setResultBaseline(entries: readonly { resource: URI; lines: readonly string[] }[]): void {
+		this.model.setResultBaseline(entries);
+	}
+
+	hasResultBaseline(): boolean {
+		return this.model.hasResultBaseline();
+	}
+
+	getResultBaseline(resource: URI): readonly string[] | undefined {
+		return this.model.getResultBaseline(resource);
+	}
+
+	getResultBaselineEntries(): { resource: URI; lines: readonly string[] }[] {
+		return this.model.getResultBaselineEntries();
+	}
+
 	override isDirty() {
 		return this.dirty;
 	}
@@ -359,6 +375,9 @@ export class SearchEditorInput extends EditorInput {
 			{ from: 'rawData', config, resultsContents: results, modelUri: newModelUri } as any // modelUri is not in the type, but we handle it below
 		);
 		input.setResultSources(this.resultSources);
+		if (this.hasResultBaseline()) {
+			input.setResultBaseline(this.getResultBaselineEntries());
+		}
 		return input;
 	}
 }
